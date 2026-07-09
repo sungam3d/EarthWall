@@ -70,25 +70,34 @@ def main() -> None:
         print(f"[earthwall] No cities loaded from {args.cities} - "
               f"copy the example cities.json there to add markers.", file=sys.stderr)
 
-    def render_once() -> None:
-        render(args.output, width, height, cities, when=datetime.now().astimezone())
-        print(f"[earthwall] {datetime.now().strftime('%H:%M:%S')} rendered -> {args.output}")
+    def render_once(alternate: bool = False) -> None:
+        # In daemon mode with wallpaper application we alternate between
+        # two output files so the image the desktop is currently showing
+        # is never rewritten in place (which flashes black mid-write on
+        # most DEs). --once keeps the exact path the user asked for.
+        if alternate:
+            from .wallpaper import pick_next_wallpaper_path
+            output = pick_next_wallpaper_path(args.output)
+        else:
+            output = args.output
+        render(output, width, height, cities, when=datetime.now().astimezone())
+        print(f"[earthwall] {datetime.now().strftime('%H:%M:%S')} rendered -> {output}")
         if not args.no_wallpaper:
-            ok = set_wallpaper(args.output, desktop=args.desktop)
+            ok = set_wallpaper(output, desktop=args.desktop)
             if not ok:
                 detected = args.desktop or detect_desktop()
                 print(f"[earthwall] could not set wallpaper automatically "
                       f"(desktop detected as '{detected}'). Image is saved at "
-                      f"{args.output} - set it manually or pass --desktop.",
+                      f"{output} - set it manually or pass --desktop.",
                       file=sys.stderr)
 
     if args.once:
-        render_once()
+        render_once(alternate=False)
         return
 
     print(f"[earthwall] running as daemon, updating every {args.interval}s. Ctrl+C to stop.")
     while True:
-        render_once()
+        render_once(alternate=not args.no_wallpaper)
         time.sleep(args.interval)
 
 

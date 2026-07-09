@@ -7,6 +7,7 @@ live cloud layer, and support for re-centering the map on any longitude.
 from __future__ import annotations
 
 import math
+import os
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -79,7 +80,9 @@ def _day_night_mask(width: int, height: int, sub_lat: float, sub_lon: float,
     # already-correctly-blended composite - mixing the two would shift
     # the terminator to the wrong place (and it did, until this fix).
     lons = np.linspace(-180, 180, width, endpoint=False) + 180 / width
-    lats = np.linspace(90, -90, height, endpoint=False) - 90 / height * -1
+    # Pixel-center latitudes: row i spans from (90 - i*180/h) down, so its
+    # center is that minus half a row height.
+    lats = np.linspace(90, -90, height, endpoint=False) - 90.0 / height
     lat_grid, lon_grid = np.meshgrid(np.radians(lats), np.radians(lons), indexing="ij")
 
     sub_lat_r = math.radians(sub_lat)
@@ -152,6 +155,14 @@ def _draw_city_markers(img: Image.Image, cities: list[dict], now_utc: datetime,
     w, h = img.size
     font_size = max(11, w // 220)
     font = _load_font(font_size)
+    placed_boxes: list[tuple[int, int, int, int]] = []
+
+    def _overlaps(box: tuple[int, int, int, int]) -> bool:
+        for other in placed_boxes:
+            if not (box[2] < other[0] or box[0] > other[2]
+                    or box[3] < other[1] or box[1] > other[3]):
+                return True
+        return False
 
     for city in cities:
         lon, lat = city["lon"], city["lat"]
@@ -174,13 +185,31 @@ def _draw_city_markers(img: Image.Image, cities: list[dict], now_utc: datetime,
         text_bbox = draw.textbbox((0, 0), label, font=font)
         tw, th = text_bbox[2] - text_bbox[0], text_bbox[3] - text_bbox[1]
         pad_x, pad_y = 8, 5
+        box_h = th + pad_y * 2
 
         label_x = x + marker_r + 8
         if label_x + tw + pad_x * 2 > w:
             label_x = x - marker_r - 8 - tw - pad_x * 2
-        label_y = y - th // 2 - pad_y
+        base_y = y - th // 2 - pad_y
 
-        box = [label_x, label_y, label_x + tw + pad_x * 2, label_y + th + pad_y * 2]
+        # If this label would sit on top of one already drawn (clustered
+        # cities like London/Paris/Amsterdam), nudge it up/down in steps
+        # until it finds clear space - far more readable than a pile-up.
+        label_y = base_y
+        for offset_steps in range(0, 6):
+            for direction in (1, -1) if offset_steps else (1,):
+                candidate_y = base_y + direction * offset_steps * (box_h + 3)
+                candidate = (label_x, candidate_y,
+                             label_x + tw + pad_x * 2, candidate_y + box_h)
+                if not _overlaps(candidate) and 0 <= candidate_y and candidate[3] <= h:
+                    label_y = candidate_y
+                    break
+            else:
+                continue
+            break
+
+        box = [label_x, label_y, label_x + tw + pad_x * 2, label_y + box_h]
+        placed_boxes.append(tuple(box))
         draw.rounded_rectangle(box, radius=6, fill=(15, 15, 20, 165))
         draw.text((label_x + pad_x, label_y + pad_y - text_bbox[1]), label,
                    font=font, fill=(255, 255, 255, 255))
@@ -222,4 +251,18 @@ def render(output_path: str | Path, width: int, height: int,
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    composite.save(output_path, quality=95)
+
+    # Atomic write: render to a temp file, then rename over the target.
+    # The desktop environment watches/reads the target path - writing it
+    # in place means it can reload a half-written file mid-save, which
+    # shows up as the wallpaper blinking to black during every update.
+    # os.replace() is atomic on the same filesystem, so readers only ever
+    # see either the complete old image or the complete new one.
+    suffix = output_path.suffix.lower()
+    fmt = "JPEG" if suffix in (".jpg", ".jpeg") else "PNG"
+    tmp_path = output_path.with_name(output_path.name + ".tmp")
+    if fmt == "JPEG":
+        composite.save(tmp_path, format=fmt, quality=90)
+    else:
+        composite.save(tmp_path, format=fmt)
+    os.replace(tmp_path, output_path)

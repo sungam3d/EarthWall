@@ -31,6 +31,29 @@ def detect_desktop() -> str:
     return "generic"
 
 
+def alternating_wallpaper_paths(base: str | Path) -> tuple[Path, Path]:
+    """Given a base path like .../current.jpg, return the (A, B) pair
+    .../current_a.jpg and .../current_b.jpg used for flicker-free updates."""
+    base = Path(base)
+    return (base.with_name(f"{base.stem}_a{base.suffix}"),
+            base.with_name(f"{base.stem}_b{base.suffix}"))
+
+
+def pick_next_wallpaper_path(base: str | Path) -> Path:
+    """Choose which of the two alternating files to render into next: the
+    one NOT currently being displayed (i.e. the older one). Rendering to a
+    fresh path and then pointing the desktop at it means the file the DE is
+    showing is never touched mid-display (no flash to black), and the URI
+    genuinely changes each update, which forces DEs that cache wallpaper
+    by URI (GNOME, KDE) to actually load the new image."""
+    a, b = alternating_wallpaper_paths(base)
+    if not a.exists():
+        return a
+    if not b.exists():
+        return b
+    return a if a.stat().st_mtime <= b.stat().st_mtime else b
+
+
 def _run(cmd: list[str]) -> bool:
     try:
         subprocess.run(cmd, check=True, capture_output=True)
@@ -58,7 +81,9 @@ def set_wallpaper(image_path: str | Path, desktop: str | None = None) -> bool:
 
     if desktop == "kde":
         # Plasma 6 ships a CLI helper for exactly this. Fall back to the
-        # older qdbus scripting method for Plasma 5 if it's missing.
+        # older D-Bus scripting method if it's missing - note the binary
+        # is named qdbus6 on some distros (e.g. Arch-based) and qdbus on
+        # others, so try both.
         if shutil.which("plasma-apply-wallpaperimage"):
             return _run(["plasma-apply-wallpaperimage", image_path])
         script = f'''
@@ -70,18 +95,23 @@ def set_wallpaper(image_path: str | Path, desktop: str | None = None) -> bool:
             d.writeConfig("Image", "file://{image_path}");
         }}
         '''
-        return _run(["qdbus", "org.kde.plasmashell", "/PlasmaShell",
-                     "org.kde.PlasmaShell.evaluateScript", script])
+        for qdbus_bin in ("qdbus6", "qdbus", "qdbus-qt6"):
+            if shutil.which(qdbus_bin):
+                return _run([qdbus_bin, "org.kde.plasmashell", "/PlasmaShell",
+                             "org.kde.PlasmaShell.evaluateScript", script])
+        return False
 
     if desktop == "xfce":
         # XFCE stores this per-monitor/workspace property; setting the
         # common "last-image" property covers the typical single-image case.
-        ok = True
         list_out = subprocess.run(
             ["xfconf-query", "-c", "xfce4-desktop", "-l"],
             capture_output=True, text=True,
         )
         props = [l for l in list_out.stdout.splitlines() if l.endswith("last-image")]
+        if not props:
+            return False
+        ok = True
         for prop in props:
             ok &= _run(["xfconf-query", "-c", "xfce4-desktop", "-p", prop,
                         "-s", image_path])

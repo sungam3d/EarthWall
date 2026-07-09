@@ -10,8 +10,14 @@ NASA Blue Marble / Black Marble imagery.
 
 ## What's in the GUI
 
-- **Live preview** of the current render, with a one-click "Update Now"
-  and a pause/resume toggle for the auto-update loop.
+- **Live preview** of the current render, with a one-click "Update Now",
+  a pause/resume toggle, and a countdown to the next automatic update.
+  The preview re-renders instantly (at low resolution) whenever you
+  change any setting, with a busy indicator while it works.
+- **Flicker-free wallpaper updates** - renders are written atomically and
+  alternate between two files, so the image your desktop is displaying is
+  never touched mid-write. No more flash-to-black transitions; you get
+  your desktop environment's normal near-instant wallpaper swap.
 - **Map picker** - switch between the bundled seasonal maps (July/December
   Blue Marble), or **import your own** day/night image pair. Almost any
   image format works (JPEG, PNG, BMP, TIFF, WEBP, GIF) - it's decoded and
@@ -20,12 +26,18 @@ NASA Blue Marble / Black Marble imagery.
 - **Map re-centering** - a slider/spinner to shift which longitude sits
   in the middle of the map, with quick presets (Americas, Atlantic, Asia,
   Pacific/Australia).
+- **Day/night edge softness slider** - from a crisp terminator line to a
+  wide, soft dusk band.
 - **City manager** - add/edit/remove city markers through a proper form,
   with a searchable built-in database of ~130 major cities (pick one and
   its coordinates/timezone fill in automatically) plus full manual entry
-  for anywhere not listed.
+  for anywhere not listed. The city list shows each city's live local
+  time, ticking in real time, and clustered cities' map labels
+  automatically spread out instead of overlapping.
 - **Live cloud overlay** (optional) - a free, near-real-time global cloud
-  layer that updates every ~3 hours, with an opacity slider.
+  layer that updates every ~3 hours, with an opacity slider. If a refresh
+  fails (offline, service hiccup), the last good cloud layer keeps being
+  used rather than clouds blinking off.
 - **Runs from the system tray** - closing the window just hides it; the
   wallpaper keeps auto-updating in the background. Right-click the tray
   icon for quick actions.

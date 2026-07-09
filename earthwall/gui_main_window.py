@@ -16,9 +16,15 @@ from . import autostart, maps as maps_module, settings as settings_module
 from .gui_city_dialog import CityDialog
 from .gui_map_dialog import ImportMapDialog
 from .gui_worker import RenderWorker
+from .wallpaper import pick_next_wallpaper_path
 
-DEFAULT_OUTPUT = Path.home() / ".cache" / "earthwall" / "current.png"
-PREVIEW_OUTPUT = Path.home() / ".cache" / "earthwall" / "preview.png"
+# Base name for the wallpaper output. Actual files alternate between
+# current_a.jpg / current_b.jpg (see pick_next_wallpaper_path) so the file
+# the desktop is displaying is never overwritten in place. JPEG rather
+# than PNG: a 4K PNG is ~10x larger and noticeably slower for the DE to
+# decode, which stretches out the visible wallpaper transition.
+WALLPAPER_BASE = Path.home() / ".cache" / "earthwall" / "current.jpg"
+PREVIEW_OUTPUT = Path.home() / ".cache" / "earthwall" / "preview.jpg"
 
 # Deliberately small - this is what re-renders on every tweak (city added,
 # slider dragged, map switched), so it needs to feel instant. The actual
@@ -54,6 +60,8 @@ class MainWindow(QMainWindow):
         self.cities = settings_module.load_cities()
         self._worker: RenderWorker | None = None
         self._preview_worker: RenderWorker | None = None
+        self._last_preview_pixmap: QPixmap | None = None
+        self._initializing = True
 
         self.update_timer = QTimer(self)
         self.update_timer.timeout.connect(self.trigger_update)
@@ -62,11 +70,18 @@ class MainWindow(QMainWindow):
         self._preview_debounce.setSingleShot(True)
         self._preview_debounce.timeout.connect(self.trigger_preview_update)
 
+        # Ticks the "Local time" column in the cities table and the
+        # next-update countdown - cheap text updates, no rendering.
+        self._clock_timer = QTimer(self)
+        self._clock_timer.timeout.connect(self._on_clock_tick)
+        self._clock_timer.start(1000)
+
         self._build_ui()
         self._load_settings_into_ui()
         self._refresh_map_list()
         self._refresh_city_table()
         self._restart_timer()
+        self._initializing = False
 
         # Kick off a first render shortly after launch.
         QTimer.singleShot(500, self.trigger_update)
@@ -96,12 +111,15 @@ class MainWindow(QMainWindow):
         preview_btn_row = QHBoxLayout()
         self.status_label = QLabel("Not updated yet")
         self.status_label.setStyleSheet("color:#888;")
+        self.next_label = QLabel("")
+        self.next_label.setStyleSheet("color:#666;")
         refresh_btn = QPushButton("Update Now")
         refresh_btn.clicked.connect(self.trigger_update)
         self.pause_btn = QPushButton("Pause Auto-Update")
         self.pause_btn.setCheckable(True)
         self.pause_btn.toggled.connect(self._on_pause_toggled)
         preview_btn_row.addWidget(self.status_label, stretch=1)
+        preview_btn_row.addWidget(self.next_label)
         preview_btn_row.addWidget(self.pause_btn)
         preview_btn_row.addWidget(refresh_btn)
         preview_layout.addLayout(preview_btn_row)
@@ -216,6 +234,25 @@ class MainWindow(QMainWindow):
         center_layout.addLayout(presets_row)
 
         layout.addWidget(center_box)
+
+        twilight_box = QGroupBox("Day/night edge softness")
+        twilight_layout = QHBoxLayout(twilight_box)
+        twilight_layout.addWidget(QLabel("Sharp"))
+        self.twilight_slider = QSlider(Qt.Horizontal)
+        self.twilight_slider.setRange(1, 18)
+        self.twilight_slider.setToolTip(
+            "Width of the twilight blend along the terminator, in degrees. "
+            "Small = crisp line, large = wide soft dusk band."
+        )
+        self.twilight_slider.valueChanged.connect(self._on_settings_changed)
+        twilight_layout.addWidget(self.twilight_slider)
+        twilight_layout.addWidget(QLabel("Soft"))
+        self.twilight_value_label = QLabel("")
+        self.twilight_value_label.setStyleSheet("color:#888;")
+        self.twilight_value_label.setMinimumWidth(28)
+        twilight_layout.addWidget(self.twilight_value_label)
+        layout.addWidget(twilight_box)
+
         layout.addStretch()
         return w
 
@@ -227,10 +264,11 @@ class MainWindow(QMainWindow):
             "Cities shown as markers on the map, each with their current local time."
         ))
 
-        self.city_table = QTableWidget(0, 4)
-        self.city_table.setHorizontalHeaderLabels(["Name", "Timezone", "Coordinates", "Colour"])
+        self.city_table = QTableWidget(0, 5)
+        self.city_table.setHorizontalHeaderLabels(
+            ["Name", "Local time", "Timezone", "Coordinates", "Colour"])
         self.city_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.city_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.city_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         self.city_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.city_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.city_table.itemDoubleClicked.connect(lambda _: self._on_edit_city())
@@ -282,6 +320,11 @@ class MainWindow(QMainWindow):
         self.center_lon_slider.setValue(int(s["center_lon"]))
         self.center_lon_spin.blockSignals(False)
 
+        self.twilight_slider.blockSignals(True)
+        self.twilight_slider.setValue(int(s.get("twilight_width_deg", 7)))
+        self.twilight_slider.blockSignals(False)
+        self.twilight_value_label.setText(f"{self.twilight_slider.value()}°")
+
         self.pause_btn.blockSignals(True)
         self.pause_btn.setChecked(s["paused"])
         self.pause_btn.setText("Resume Auto-Update" if s["paused"] else "Pause Auto-Update")
@@ -293,6 +336,8 @@ class MainWindow(QMainWindow):
         return self.width_spin.value(), self.height_spin.value()
 
     def _on_settings_changed(self, *_args) -> None:
+        if self._initializing:
+            return
         self.settings["interval_seconds"] = self.interval_spin.value() * 60
         if self.resolution_combo.currentIndex() == 0:
             self.settings["resolution"] = "auto"
@@ -301,6 +346,8 @@ class MainWindow(QMainWindow):
         self.settings["live_clouds"] = self.clouds_check.isChecked()
         self.settings["cloud_opacity"] = self.cloud_opacity_slider.value() / 100
         self.settings["center_lon"] = float(self.center_lon_spin.value())
+        self.settings["twilight_width_deg"] = float(self.twilight_slider.value())
+        self.twilight_value_label.setText(f"{self.twilight_slider.value()}°")
         settings_module.save_settings(self.settings)
         self._restart_timer()
         self._schedule_preview_update()
@@ -388,17 +435,48 @@ class MainWindow(QMainWindow):
         self._schedule_preview_update()
 
     # --------------------------------------------------------------- cities
+    @staticmethod
+    def _city_local_time(city: dict) -> str:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        try:
+            return datetime.now(ZoneInfo(city["tz"])).strftime("%H:%M")
+        except Exception:
+            return "--:--"
+
     def _refresh_city_table(self) -> None:
         self.city_table.setRowCount(len(self.cities))
         for row, city in enumerate(self.cities):
             self.city_table.setItem(row, 0, QTableWidgetItem(city["name"]))
-            self.city_table.setItem(row, 1, QTableWidgetItem(city["tz"]))
+            self.city_table.setItem(row, 1, QTableWidgetItem(self._city_local_time(city)))
+            self.city_table.setItem(row, 2, QTableWidgetItem(city["tz"]))
             coord_text = f"{city['lat']:.2f}, {city['lon']:.2f}"
-            self.city_table.setItem(row, 2, QTableWidgetItem(coord_text))
+            self.city_table.setItem(row, 3, QTableWidgetItem(coord_text))
             color_item = QTableWidgetItem("")
             color = city.get("color", [255, 210, 60])
             color_item.setBackground(QColor(*color))
-            self.city_table.setItem(row, 3, color_item)
+            self.city_table.setItem(row, 4, color_item)
+
+    def _on_clock_tick(self) -> None:
+        """Once a second: refresh the countdown label, and (only while the
+        window is actually visible) the live local-time column."""
+        if self.settings.get("paused"):
+            self.next_label.setText("auto-update paused")
+        elif self.update_timer.isActive():
+            remaining = max(0, self.update_timer.remainingTime())
+            mins, secs = divmod(remaining // 1000, 60)
+            self.next_label.setText(f"next update in {mins}:{secs:02d}")
+
+        if not self.isVisible():
+            return
+        for row, city in enumerate(self.cities):
+            if row >= self.city_table.rowCount():
+                break
+            item = self.city_table.item(row, 1)
+            if item is not None:
+                new_text = self._city_local_time(city)
+                if item.text() != new_text:
+                    item.setText(new_text)
 
     def _on_add_city(self) -> None:
         dialog = CityDialog(self)
@@ -440,18 +518,24 @@ class MainWindow(QMainWindow):
                (self._preview_worker is not None and self._preview_worker.isRunning())
         self.progress.setVisible(busy)
 
-    def trigger_update(self, apply_wallpaper: bool = True) -> None:
-        """Full-resolution render, used by the auto-update timer and the
-        'Update Now' button - this is the one that actually becomes your
-        desktop wallpaper."""
+    def trigger_update(self, *_qt_args) -> None:
+        """Full-resolution render + apply as the desktop wallpaper. Used by
+        the auto-update timer, the 'Update Now' button, and the tray.
+
+        Note the *_qt_args sink: Qt's clicked/triggered signals pass a
+        'checked' bool as the first positional argument. An earlier version
+        took `apply_wallpaper` as the first parameter, so that stray bool
+        silently disabled applying the wallpaper whenever the button or
+        tray action was used - the timer worked, the button didn't."""
         if self._worker is not None and self._worker.isRunning():
             return  # a render is already in flight, skip this tick
         width, height = self._current_resolution()
+        output_path = pick_next_wallpaper_path(WALLPAPER_BASE)
         self.status_label.setText("Rendering…")
         self.progress.show()
         self._worker = RenderWorker(
-            dict(self.settings), list(self.cities), str(DEFAULT_OUTPUT),
-            width, height, apply_wallpaper=apply_wallpaper,
+            dict(self.settings), list(self.cities), str(output_path),
+            width, height, apply_wallpaper=True,
         )
         self._worker.finished_ok.connect(self._on_render_done)
         self._worker.finished_err.connect(self._on_render_error)
@@ -495,15 +579,27 @@ class MainWindow(QMainWindow):
             self._preview_worker.wait(5000)
 
     def _show_preview_pixmap(self, output_path: str) -> None:
-        pixmap = QPixmap(output_path)
-        scaled = pixmap.scaled(self.preview_label.width() or 640, 260,
-                                Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self._last_preview_pixmap = QPixmap(output_path)
+        self._rescale_preview()
+
+    def _rescale_preview(self) -> None:
+        if self._last_preview_pixmap is None or self._last_preview_pixmap.isNull():
+            return
+        scaled = self._last_preview_pixmap.scaled(
+            max(320, self.preview_label.width()),
+            max(180, self.preview_label.height()),
+            Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.preview_label.setPixmap(scaled)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._rescale_preview()
 
     def _on_render_done(self, output_path: str) -> None:
         from datetime import datetime
         self._show_preview_pixmap(output_path)
-        self.status_label.setText(f"Last updated {datetime.now().strftime('%H:%M:%S')}")
+        self.status_label.setText(
+            f"Wallpaper updated {datetime.now().strftime('%H:%M:%S')}")
 
     def _on_preview_render_done(self, output_path: str) -> None:
         self._show_preview_pixmap(output_path)
