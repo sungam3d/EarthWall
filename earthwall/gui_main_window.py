@@ -1,0 +1,448 @@
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QPixmap, QColor
+from PySide6.QtWidgets import (
+    QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox,
+    QHBoxLayout, QHeaderView, QLabel, QListWidget, QListWidgetItem,
+    QMainWindow, QMessageBox, QPushButton, QSlider, QSpinBox,
+    QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
+)
+
+from . import autostart, maps as maps_module, settings as settings_module
+from .gui_city_dialog import CityDialog
+from .gui_map_dialog import ImportMapDialog
+from .gui_worker import RenderWorker
+
+DEFAULT_OUTPUT = Path.home() / ".cache" / "earthwall" / "current.png"
+
+
+def _detect_resolution() -> tuple[int, int]:
+    try:
+        out = subprocess.run(["xrandr"], capture_output=True, text=True, check=True).stdout
+        for line in out.splitlines():
+            if " connected" in line and "primary" in line:
+                for token in line.split():
+                    if "x" in token and token[0].isdigit():
+                        w, h = token.split("+")[0].split("x")
+                        return int(w), int(h)
+    except Exception:
+        pass
+    return 3840, 2160
+
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Earthwall")
+        self.setMinimumSize(720, 640)
+
+        self.settings = settings_module.load_settings()
+        self.cities = settings_module.load_cities()
+        self._worker: RenderWorker | None = None
+
+        self.update_timer = QTimer(self)
+        self.update_timer.timeout.connect(self.trigger_update)
+
+        self._build_ui()
+        self._load_settings_into_ui()
+        self._refresh_map_list()
+        self._refresh_city_table()
+        self._restart_timer()
+
+        # Kick off a first render shortly after launch.
+        QTimer.singleShot(500, self.trigger_update)
+
+    # ------------------------------------------------------------------ UI
+    def _build_ui(self) -> None:
+        central = QWidget()
+        self.setCentralWidget(central)
+        root = QVBoxLayout(central)
+
+        # --- Preview -----------------------------------------------------
+        preview_box = QGroupBox("Preview")
+        preview_layout = QVBoxLayout(preview_box)
+        self.preview_label = QLabel("No preview yet - rendering…")
+        self.preview_label.setAlignment(Qt.AlignCenter)
+        self.preview_label.setMinimumHeight(220)
+        self.preview_label.setStyleSheet("background:#111; color:#888; border-radius:6px;")
+        preview_layout.addWidget(self.preview_label)
+
+        preview_btn_row = QHBoxLayout()
+        self.status_label = QLabel("Not updated yet")
+        self.status_label.setStyleSheet("color:#888;")
+        refresh_btn = QPushButton("Update Now")
+        refresh_btn.clicked.connect(self.trigger_update)
+        self.pause_btn = QPushButton("Pause Auto-Update")
+        self.pause_btn.setCheckable(True)
+        self.pause_btn.toggled.connect(self._on_pause_toggled)
+        preview_btn_row.addWidget(self.status_label, stretch=1)
+        preview_btn_row.addWidget(self.pause_btn)
+        preview_btn_row.addWidget(refresh_btn)
+        preview_layout.addLayout(preview_btn_row)
+        root.addWidget(preview_box)
+
+        # --- Tabs ----------------------------------------------------------
+        tabs = QTabWidget()
+        tabs.addTab(self._build_general_tab(), "General")
+        tabs.addTab(self._build_map_tab(), "Map && View")
+        tabs.addTab(self._build_cities_tab(), "Cities")
+        root.addWidget(tabs, stretch=1)
+
+    def _build_general_tab(self) -> QWidget:
+        w = QWidget()
+        layout = QVBoxLayout(w)
+
+        form = QFormLayout()
+        self.interval_spin = QSpinBox()
+        self.interval_spin.setRange(1, 180)
+        self.interval_spin.setSuffix(" minutes")
+        self.interval_spin.valueChanged.connect(self._on_settings_changed)
+        form.addRow("Update every:", self.interval_spin)
+
+        self.resolution_combo = QComboBox()
+        self.resolution_combo.addItems(["Auto-detect", "Custom"])
+        self.resolution_combo.currentIndexChanged.connect(self._on_resolution_mode_changed)
+        form.addRow("Wallpaper resolution:", self.resolution_combo)
+
+        res_row = QHBoxLayout()
+        self.width_spin = QSpinBox()
+        self.width_spin.setRange(640, 15360)
+        self.width_spin.setValue(3840)
+        self.height_spin = QSpinBox()
+        self.height_spin.setRange(360, 8640)
+        self.height_spin.setValue(2160)
+        self.width_spin.valueChanged.connect(self._on_settings_changed)
+        self.height_spin.valueChanged.connect(self._on_settings_changed)
+        res_row.addWidget(self.width_spin)
+        res_row.addWidget(QLabel("x"))
+        res_row.addWidget(self.height_spin)
+        res_row.addStretch()
+        form.addRow("Custom size:", res_row)
+
+        layout.addLayout(form)
+
+        self.autostart_check = QCheckBox("Start automatically when I log in")
+        self.autostart_check.toggled.connect(self._on_autostart_toggled)
+        layout.addWidget(self.autostart_check)
+
+        clouds_box = QGroupBox("Live clouds")
+        clouds_layout = QVBoxLayout(clouds_box)
+        self.clouds_check = QCheckBox("Overlay near-real-time cloud cover (updates every ~3 hours, needs internet)")
+        self.clouds_check.toggled.connect(self._on_settings_changed)
+        clouds_layout.addWidget(self.clouds_check)
+
+        opacity_row = QHBoxLayout()
+        opacity_row.addWidget(QLabel("Cloud opacity:"))
+        self.cloud_opacity_slider = QSlider(Qt.Horizontal)
+        self.cloud_opacity_slider.setRange(0, 100)
+        self.cloud_opacity_slider.valueChanged.connect(self._on_settings_changed)
+        opacity_row.addWidget(self.cloud_opacity_slider)
+        clouds_layout.addLayout(opacity_row)
+        layout.addWidget(clouds_box)
+
+        layout.addStretch()
+        return w
+
+    def _build_map_tab(self) -> QWidget:
+        w = QWidget()
+        layout = QVBoxLayout(w)
+
+        layout.addWidget(QLabel("Choose which world map image to render:"))
+        self.map_list = QListWidget()
+        self.map_list.currentItemChanged.connect(self._on_map_selected)
+        layout.addWidget(self.map_list)
+
+        map_btn_row = QHBoxLayout()
+        import_btn = QPushButton("Import New Map…")
+        import_btn.clicked.connect(self._on_import_map)
+        self.delete_map_btn = QPushButton("Delete Selected")
+        self.delete_map_btn.clicked.connect(self._on_delete_map)
+        map_btn_row.addWidget(import_btn)
+        map_btn_row.addWidget(self.delete_map_btn)
+        map_btn_row.addStretch()
+        layout.addLayout(map_btn_row)
+
+        center_box = QGroupBox("Map center position")
+        center_layout = QVBoxLayout(center_box)
+        center_layout.addWidget(QLabel(
+            "Shift which longitude sits in the middle of the map "
+            "(0° = Prime Meridian/Africa-Europe centered, the default)."
+        ))
+        slider_row = QHBoxLayout()
+        self.center_lon_slider = QSlider(Qt.Horizontal)
+        self.center_lon_slider.setRange(-180, 180)
+        self.center_lon_spin = QSpinBox()
+        self.center_lon_spin.setRange(-180, 180)
+        self.center_lon_spin.setSuffix("°")
+        self.center_lon_slider.valueChanged.connect(self.center_lon_spin.setValue)
+        self.center_lon_spin.valueChanged.connect(self.center_lon_slider.setValue)
+        self.center_lon_spin.valueChanged.connect(self._on_settings_changed)
+        slider_row.addWidget(self.center_lon_slider)
+        slider_row.addWidget(self.center_lon_spin)
+        center_layout.addLayout(slider_row)
+
+        presets_row = QHBoxLayout()
+        for label, lon in [("Americas", -90), ("Atlantic (default)", 0),
+                            ("Asia", 100), ("Pacific / Australia", 150)]:
+            btn = QPushButton(label)
+            btn.clicked.connect(lambda _, v=lon: self.center_lon_spin.setValue(v))
+            presets_row.addWidget(btn)
+        center_layout.addLayout(presets_row)
+
+        layout.addWidget(center_box)
+        layout.addStretch()
+        return w
+
+    def _build_cities_tab(self) -> QWidget:
+        w = QWidget()
+        layout = QVBoxLayout(w)
+
+        layout.addWidget(QLabel(
+            "Cities shown as markers on the map, each with their current local time."
+        ))
+
+        self.city_table = QTableWidget(0, 4)
+        self.city_table.setHorizontalHeaderLabels(["Name", "Timezone", "Coordinates", "Colour"])
+        self.city_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.city_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.city_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.city_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.city_table.itemDoubleClicked.connect(lambda _: self._on_edit_city())
+        layout.addWidget(self.city_table)
+
+        btn_row = QHBoxLayout()
+        add_btn = QPushButton("Add City…")
+        add_btn.clicked.connect(self._on_add_city)
+        edit_btn = QPushButton("Edit Selected…")
+        edit_btn.clicked.connect(self._on_edit_city)
+        remove_btn = QPushButton("Remove Selected")
+        remove_btn.clicked.connect(self._on_remove_city)
+        btn_row.addWidget(add_btn)
+        btn_row.addWidget(edit_btn)
+        btn_row.addWidget(remove_btn)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
+        return w
+
+    # ------------------------------------------------------ settings <-> UI
+    def _load_settings_into_ui(self) -> None:
+        s = self.settings
+        self.interval_spin.blockSignals(True)
+        self.interval_spin.setValue(max(1, s["interval_seconds"] // 60))
+        self.interval_spin.blockSignals(False)
+
+        if s["resolution"] == "auto":
+            self.resolution_combo.setCurrentIndex(0)
+        else:
+            self.resolution_combo.setCurrentIndex(1)
+            self.width_spin.setValue(s["resolution"][0])
+            self.height_spin.setValue(s["resolution"][1])
+        self._on_resolution_mode_changed()
+
+        self.autostart_check.blockSignals(True)
+        self.autostart_check.setChecked(autostart.is_enabled())
+        self.autostart_check.blockSignals(False)
+
+        self.clouds_check.blockSignals(True)
+        self.clouds_check.setChecked(s["live_clouds"])
+        self.clouds_check.blockSignals(False)
+        self.cloud_opacity_slider.blockSignals(True)
+        self.cloud_opacity_slider.setValue(int(s["cloud_opacity"] * 100))
+        self.cloud_opacity_slider.blockSignals(False)
+
+        self.center_lon_spin.blockSignals(True)
+        self.center_lon_spin.setValue(int(s["center_lon"]))
+        self.center_lon_slider.setValue(int(s["center_lon"]))
+        self.center_lon_spin.blockSignals(False)
+
+        self.pause_btn.blockSignals(True)
+        self.pause_btn.setChecked(s["paused"])
+        self.pause_btn.setText("Resume Auto-Update" if s["paused"] else "Pause Auto-Update")
+        self.pause_btn.blockSignals(False)
+
+    def _current_resolution(self) -> tuple[int, int]:
+        if self.resolution_combo.currentIndex() == 0:
+            return _detect_resolution()
+        return self.width_spin.value(), self.height_spin.value()
+
+    def _on_settings_changed(self, *_args) -> None:
+        self.settings["interval_seconds"] = self.interval_spin.value() * 60
+        if self.resolution_combo.currentIndex() == 0:
+            self.settings["resolution"] = "auto"
+        else:
+            self.settings["resolution"] = [self.width_spin.value(), self.height_spin.value()]
+        self.settings["live_clouds"] = self.clouds_check.isChecked()
+        self.settings["cloud_opacity"] = self.cloud_opacity_slider.value() / 100
+        self.settings["center_lon"] = float(self.center_lon_spin.value())
+        settings_module.save_settings(self.settings)
+        self._restart_timer()
+
+    def _on_resolution_mode_changed(self) -> None:
+        custom = self.resolution_combo.currentIndex() == 1
+        self.width_spin.setEnabled(custom)
+        self.height_spin.setEnabled(custom)
+        self._on_settings_changed()
+
+    def _on_autostart_toggled(self, checked: bool) -> None:
+        if checked:
+            autostart.enable()
+        else:
+            autostart.disable()
+        self.settings["autostart"] = checked
+        settings_module.save_settings(self.settings)
+
+    def _on_pause_toggled(self, checked: bool) -> None:
+        self.settings["paused"] = checked
+        settings_module.save_settings(self.settings)
+        self.pause_btn.setText("Resume Auto-Update" if checked else "Pause Auto-Update")
+        self._restart_timer()
+
+    def _restart_timer(self) -> None:
+        self.update_timer.stop()
+        if not self.settings.get("paused"):
+            self.update_timer.start(self.settings["interval_seconds"] * 1000)
+
+    # ----------------------------------------------------------------- maps
+    def _refresh_map_list(self) -> None:
+        self.map_list.blockSignals(True)
+        self.map_list.clear()
+        maps = maps_module.list_map_sets()
+        selected_row = 0
+        for i, (map_id, info) in enumerate(maps.items()):
+            label = info["name"] + ("" if info["builtin"] else "  (custom)")
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, map_id)
+            self.map_list.addItem(item)
+            if map_id == self.settings.get("map_set"):
+                selected_row = i
+        if self.map_list.count():
+            self.map_list.setCurrentRow(selected_row)
+        self.map_list.blockSignals(False)
+
+    def _on_map_selected(self, current: QListWidgetItem, _prev) -> None:
+        if current is None:
+            return
+        map_id = current.data(Qt.UserRole)
+        self.settings["map_set"] = map_id
+        settings_module.save_settings(self.settings)
+        info = maps_module.list_map_sets().get(map_id, {})
+        self.delete_map_btn.setEnabled(not info.get("builtin", True))
+
+    def _on_import_map(self) -> None:
+        dialog = ImportMapDialog(self)
+        if dialog.exec():
+            name, day_path, night_path = dialog.result_values()
+            try:
+                map_id = maps_module.import_map_set(name, day_path, night_path)
+            except maps_module.MapImportError as e:
+                QMessageBox.warning(self, "Import failed", str(e))
+                return
+            self._refresh_map_list()
+            self.settings["map_set"] = map_id
+            settings_module.save_settings(self.settings)
+            self.trigger_update()
+
+    def _on_delete_map(self) -> None:
+        item = self.map_list.currentItem()
+        if not item:
+            return
+        map_id = item.data(Qt.UserRole)
+        confirm = QMessageBox.question(self, "Delete map", "Remove this imported map?")
+        if confirm != QMessageBox.Yes:
+            return
+        try:
+            maps_module.delete_map_set(map_id)
+        except maps_module.MapImportError as e:
+            QMessageBox.warning(self, "Couldn't delete", str(e))
+            return
+        self._refresh_map_list()
+
+    # --------------------------------------------------------------- cities
+    def _refresh_city_table(self) -> None:
+        self.city_table.setRowCount(len(self.cities))
+        for row, city in enumerate(self.cities):
+            self.city_table.setItem(row, 0, QTableWidgetItem(city["name"]))
+            self.city_table.setItem(row, 1, QTableWidgetItem(city["tz"]))
+            coord_text = f"{city['lat']:.2f}, {city['lon']:.2f}"
+            self.city_table.setItem(row, 2, QTableWidgetItem(coord_text))
+            color_item = QTableWidgetItem("")
+            color = city.get("color", [255, 210, 60])
+            color_item.setBackground(QColor(*color))
+            self.city_table.setItem(row, 3, color_item)
+
+    def _on_add_city(self) -> None:
+        dialog = CityDialog(self)
+        if dialog.exec():
+            self.cities.append(dialog.result_city())
+            settings_module.save_cities(self.cities)
+            self._refresh_city_table()
+            self.trigger_update()
+
+    def _on_edit_city(self) -> None:
+        row = self.city_table.currentRow()
+        if row < 0:
+            return
+        dialog = CityDialog(self, existing=self.cities[row])
+        if dialog.exec():
+            self.cities[row] = dialog.result_city()
+            settings_module.save_cities(self.cities)
+            self._refresh_city_table()
+            self.trigger_update()
+
+    def _on_remove_city(self) -> None:
+        row = self.city_table.currentRow()
+        if row < 0:
+            return
+        del self.cities[row]
+        settings_module.save_cities(self.cities)
+        self._refresh_city_table()
+        self.trigger_update()
+
+    # -------------------------------------------------------------- render
+    def trigger_update(self, apply_wallpaper: bool = True) -> None:
+        if self._worker is not None and self._worker.isRunning():
+            return  # a render is already in flight, skip this tick
+        width, height = self._current_resolution()
+        self.status_label.setText("Rendering…")
+        self._worker = RenderWorker(
+            dict(self.settings), list(self.cities), str(DEFAULT_OUTPUT),
+            width, height, apply_wallpaper=apply_wallpaper,
+        )
+        self._worker.finished_ok.connect(self._on_render_done)
+        self._worker.finished_err.connect(self._on_render_error)
+        # Let Qt reclaim the thread object itself once it's done, and drop
+        # our own reference - otherwise a worker whose finished_ok/err
+        # signal fires after the window is closing can be destroyed by
+        # Python's GC while the underlying QThread is still tearing down.
+        self._worker.finished.connect(self._worker.deleteLater)
+        self._worker.finished.connect(self._clear_worker_ref)
+        self._worker.start()
+
+    def _clear_worker_ref(self) -> None:
+        self._worker = None
+
+    def shutdown(self) -> None:
+        """Called on application quit - block briefly for any in-flight
+        render so we don't tear down the process mid-thread."""
+        if self._worker is not None and self._worker.isRunning():
+            self._worker.wait(5000)
+
+    def _on_render_done(self, output_path: str) -> None:
+        from datetime import datetime
+        pixmap = QPixmap(output_path)
+        scaled = pixmap.scaled(self.preview_label.width() or 640, 260,
+                                Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.preview_label.setPixmap(scaled)
+        self.status_label.setText(f"Last updated {datetime.now().strftime('%H:%M:%S')}")
+
+    def _on_render_error(self, message: str) -> None:
+        self.status_label.setText(f"Error: {message}")
+
+    def closeEvent(self, event) -> None:
+        event.ignore()
+        self.hide()

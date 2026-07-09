@@ -1,0 +1,14 @@
+[Unit]
+Description=Earthwall live earth wallpaper daemon
+After=graphical-session.target
+
+[Service]
+Type=simple
+# Adjust this path if you installed earthwall somewhere other than ~/earthwall
+WorkingDirectory=%h/earthwall
+ExecStart=%h/earthwall/venv/bin/python -m earthwall.cli --interval 300
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
