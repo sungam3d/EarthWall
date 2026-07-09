@@ -17,17 +17,43 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont
 from .sun import subsolar_point
 from . import maps as maps_module
 
+# Decoding the source JPEGs (5400x2700 + 3600x1800) is a fixed cost on
+# every render regardless of the requested output size. Since the same
+# map set is typically re-rendered many times in a row (auto-update timer,
+# a burst of preview renders while tweaking settings), keep the decoded
+# originals in memory rather than re-reading and re-decoding from disk
+# every time. Safe to keep unbounded in practice - there are only ever a
+# handful of map sets, and they're a few MB each once decoded.
+_MAP_CACHE: dict[str, tuple[Image.Image, Image.Image]] = {}
+
 
 def _load_maps(map_id: str) -> tuple[Image.Image, Image.Image]:
+    if map_id in _MAP_CACHE:
+        return _MAP_CACHE[map_id]
+
     available = maps_module.list_map_sets()
     if map_id not in available:
         map_id = next(iter(available))
+        if map_id in _MAP_CACHE:
+            return _MAP_CACHE[map_id]
+
     entry = available[map_id]
     day = Image.open(entry["day_path"]).convert("RGB")
     night = Image.open(entry["night_path"]).convert("RGB")
     if night.size != day.size:
         night = night.resize(day.size, Image.LANCZOS)
+
+    _MAP_CACHE[map_id] = (day, night)
     return day, night
+
+
+def invalidate_map_cache(map_id: str | None = None) -> None:
+    """Drop cached decoded map(s) - call after deleting a map set so a
+    stale copy doesn't linger in memory needlessly."""
+    if map_id is None:
+        _MAP_CACHE.clear()
+    else:
+        _MAP_CACHE.pop(map_id, None)
 
 
 def _roll_longitude(img: Image.Image, center_lon: float) -> Image.Image:
@@ -173,11 +199,20 @@ def render(output_path: str | Path, width: int, height: int,
     sub_lat, sub_lon = subsolar_point(when)
 
     day_img, night_img = _load_maps(map_id)
+
+    # Downsample to the target size FIRST, before the per-pixel day/night
+    # blend - the blend math (and the unsharp mask afterwards) then scales
+    # with the requested output size instead of the ~5400x2700 source
+    # resolution every time. This is the difference between a "low-res
+    # preview" actually being fast versus doing full-resolution work and
+    # throwing most of it away at the final resize.
+    if day_img.size != (width, height):
+        day_img = day_img.resize((width, height), Image.LANCZOS)
+        night_img = night_img.resize((width, height), Image.LANCZOS)
+
     composite = _composite_day_night(day_img, night_img, sub_lat, sub_lon,
                                       twilight_width_deg)
     composite = _roll_longitude(composite, center_lon)
-
-    composite = composite.resize((width, height), Image.LANCZOS)
     composite = composite.filter(ImageFilter.UnsharpMask(radius=1.5, percent=60, threshold=2))
 
     if cloud_layer is not None:

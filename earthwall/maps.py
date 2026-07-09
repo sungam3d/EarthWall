@@ -141,3 +141,8 @@ def delete_map_set(map_id: str) -> None:
     if not map_dir.exists() or not map_dir.is_relative_to(USER_MAPS_DIR):
         raise MapImportError("That map can't be deleted (it may be a built-in map).")
     shutil.rmtree(map_dir)
+    try:
+        from . import render as render_module
+        render_module.invalidate_map_cache(map_id)
+    except ImportError:
+        pass

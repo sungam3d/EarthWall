@@ -8,7 +8,7 @@ from PySide6.QtGui import QPixmap, QColor
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox,
     QHBoxLayout, QHeaderView, QLabel, QListWidget, QListWidgetItem,
-    QMainWindow, QMessageBox, QPushButton, QSlider, QSpinBox,
+    QMainWindow, QMessageBox, QProgressBar, QPushButton, QSlider, QSpinBox,
     QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
@@ -18,6 +18,16 @@ from .gui_map_dialog import ImportMapDialog
 from .gui_worker import RenderWorker
 
 DEFAULT_OUTPUT = Path.home() / ".cache" / "earthwall" / "current.png"
+PREVIEW_OUTPUT = Path.home() / ".cache" / "earthwall" / "preview.png"
+
+# Deliberately small - this is what re-renders on every tweak (city added,
+# slider dragged, map switched), so it needs to feel instant. The actual
+# wallpaper still renders at full resolution via the timer / Update Now.
+PREVIEW_WIDTH, PREVIEW_HEIGHT = 1280, 640
+
+# How long to wait after the last change before actually re-rendering the
+# preview - stops a slider drag from queuing up dozens of renders.
+PREVIEW_DEBOUNCE_MS = 350
 
 
 def _detect_resolution() -> tuple[int, int]:
@@ -43,9 +53,14 @@ class MainWindow(QMainWindow):
         self.settings = settings_module.load_settings()
         self.cities = settings_module.load_cities()
         self._worker: RenderWorker | None = None
+        self._preview_worker: RenderWorker | None = None
 
         self.update_timer = QTimer(self)
         self.update_timer.timeout.connect(self.trigger_update)
+
+        self._preview_debounce = QTimer(self)
+        self._preview_debounce.setSingleShot(True)
+        self._preview_debounce.timeout.connect(self.trigger_preview_update)
 
         self._build_ui()
         self._load_settings_into_ui()
@@ -70,6 +85,13 @@ class MainWindow(QMainWindow):
         self.preview_label.setMinimumHeight(220)
         self.preview_label.setStyleSheet("background:#111; color:#888; border-radius:6px;")
         preview_layout.addWidget(self.preview_label)
+
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 0)  # indeterminate/"busy" animation
+        self.progress.setTextVisible(False)
+        self.progress.setFixedHeight(4)
+        self.progress.hide()
+        preview_layout.addWidget(self.progress)
 
         preview_btn_row = QHBoxLayout()
         self.status_label = QLabel("Not updated yet")
@@ -281,6 +303,7 @@ class MainWindow(QMainWindow):
         self.settings["center_lon"] = float(self.center_lon_spin.value())
         settings_module.save_settings(self.settings)
         self._restart_timer()
+        self._schedule_preview_update()
 
     def _on_resolution_mode_changed(self) -> None:
         custom = self.resolution_combo.currentIndex() == 1
@@ -332,6 +355,7 @@ class MainWindow(QMainWindow):
         settings_module.save_settings(self.settings)
         info = maps_module.list_map_sets().get(map_id, {})
         self.delete_map_btn.setEnabled(not info.get("builtin", True))
+        self._schedule_preview_update()
 
     def _on_import_map(self) -> None:
         dialog = ImportMapDialog(self)
@@ -345,7 +369,7 @@ class MainWindow(QMainWindow):
             self._refresh_map_list()
             self.settings["map_set"] = map_id
             settings_module.save_settings(self.settings)
-            self.trigger_update()
+            self._schedule_preview_update()
 
     def _on_delete_map(self) -> None:
         item = self.map_list.currentItem()
@@ -361,6 +385,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Couldn't delete", str(e))
             return
         self._refresh_map_list()
+        self._schedule_preview_update()
 
     # --------------------------------------------------------------- cities
     def _refresh_city_table(self) -> None:
@@ -381,7 +406,7 @@ class MainWindow(QMainWindow):
             self.cities.append(dialog.result_city())
             settings_module.save_cities(self.cities)
             self._refresh_city_table()
-            self.trigger_update()
+            self._schedule_preview_update()
 
     def _on_edit_city(self) -> None:
         row = self.city_table.currentRow()
@@ -392,7 +417,7 @@ class MainWindow(QMainWindow):
             self.cities[row] = dialog.result_city()
             settings_module.save_cities(self.cities)
             self._refresh_city_table()
-            self.trigger_update()
+            self._schedule_preview_update()
 
     def _on_remove_city(self) -> None:
         row = self.city_table.currentRow()
@@ -401,44 +426,87 @@ class MainWindow(QMainWindow):
         del self.cities[row]
         settings_module.save_cities(self.cities)
         self._refresh_city_table()
-        self.trigger_update()
+        self._schedule_preview_update()
 
     # -------------------------------------------------------------- render
+    def _schedule_preview_update(self) -> None:
+        """(Re)start the debounce timer - rapid-fire changes (like dragging
+        the center-longitude slider) collapse into a single render once
+        things settle, instead of queuing up a render per tick."""
+        self._preview_debounce.start(PREVIEW_DEBOUNCE_MS)
+
+    def _update_busy_indicator(self) -> None:
+        busy = (self._worker is not None and self._worker.isRunning()) or \
+               (self._preview_worker is not None and self._preview_worker.isRunning())
+        self.progress.setVisible(busy)
+
     def trigger_update(self, apply_wallpaper: bool = True) -> None:
+        """Full-resolution render, used by the auto-update timer and the
+        'Update Now' button - this is the one that actually becomes your
+        desktop wallpaper."""
         if self._worker is not None and self._worker.isRunning():
             return  # a render is already in flight, skip this tick
         width, height = self._current_resolution()
         self.status_label.setText("Rendering…")
+        self.progress.show()
         self._worker = RenderWorker(
             dict(self.settings), list(self.cities), str(DEFAULT_OUTPUT),
             width, height, apply_wallpaper=apply_wallpaper,
         )
         self._worker.finished_ok.connect(self._on_render_done)
         self._worker.finished_err.connect(self._on_render_error)
-        # Let Qt reclaim the thread object itself once it's done, and drop
-        # our own reference - otherwise a worker whose finished_ok/err
-        # signal fires after the window is closing can be destroyed by
-        # Python's GC while the underlying QThread is still tearing down.
         self._worker.finished.connect(self._worker.deleteLater)
         self._worker.finished.connect(self._clear_worker_ref)
         self._worker.start()
 
+    def trigger_preview_update(self) -> None:
+        """Fast, low-resolution render for instant visual feedback while
+        editing settings - never touches the actual desktop wallpaper."""
+        if self._preview_worker is not None and self._preview_worker.isRunning():
+            # A preview render is already running; the debounce timer will
+            # fire again shortly after it finishes if more changes came in.
+            self._preview_debounce.start(PREVIEW_DEBOUNCE_MS)
+            return
+        self.progress.show()
+        self._preview_worker = RenderWorker(
+            dict(self.settings), list(self.cities), str(PREVIEW_OUTPUT),
+            PREVIEW_WIDTH, PREVIEW_HEIGHT, apply_wallpaper=False,
+        )
+        self._preview_worker.finished_ok.connect(self._on_preview_render_done)
+        self._preview_worker.finished_err.connect(self._on_render_error)
+        self._preview_worker.finished.connect(self._preview_worker.deleteLater)
+        self._preview_worker.finished.connect(self._clear_preview_worker_ref)
+        self._preview_worker.start()
+
     def _clear_worker_ref(self) -> None:
         self._worker = None
+        self._update_busy_indicator()
+
+    def _clear_preview_worker_ref(self) -> None:
+        self._preview_worker = None
+        self._update_busy_indicator()
 
     def shutdown(self) -> None:
         """Called on application quit - block briefly for any in-flight
         render so we don't tear down the process mid-thread."""
         if self._worker is not None and self._worker.isRunning():
             self._worker.wait(5000)
+        if self._preview_worker is not None and self._preview_worker.isRunning():
+            self._preview_worker.wait(5000)
 
-    def _on_render_done(self, output_path: str) -> None:
-        from datetime import datetime
+    def _show_preview_pixmap(self, output_path: str) -> None:
         pixmap = QPixmap(output_path)
         scaled = pixmap.scaled(self.preview_label.width() or 640, 260,
                                 Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.preview_label.setPixmap(scaled)
+
+    def _on_render_done(self, output_path: str) -> None:
+        from datetime import datetime
+        self._show_preview_pixmap(output_path)
         self.status_label.setText(f"Last updated {datetime.now().strftime('%H:%M:%S')}")
+
+    def _on_preview_render_done(self, output_path: str) -> None:
+        self._show_preview_pixmap(output_path)
 
     def _on_render_error(self, message: str) -> None:
         self.status_label.setText(f"Error: {message}")
