@@ -632,6 +632,12 @@ def render(output_path: str | Path, width: int, height: int,
            monitors_mode: str = "mirror",
            monitor_layout=None,  # earthwall.monitors.MonitorLayout | None
            map_zoom: float = 1.0,
+           # Explicit map placement inside the virtual desktop. 0/0 =
+           # "auto-centre" (the default). Any non-zero value pins the
+           # map's top-left corner at those pixel coordinates - what the
+           # Displays tab position spinboxes write.
+           map_pos_x: int = 0,
+           map_pos_y: int = 0,
            void_fill_color: str = "#000000",
            void_fill_image: str | None = None) -> None:
     """Render one wallpaper frame and save it to `output_path`.
@@ -657,13 +663,15 @@ def render(output_path: str | Path, width: int, height: int,
         virtual_h = monitor_layout.virtual_height
         map_w = max(1, int(round(virtual_w * map_zoom)))
         map_h = max(1, int(round(virtual_h * map_zoom)))
-        # Center the map on the virtual desktop, then shift by the focal
-        # latitude. Longitude focal is handled inside the map by
-        # _roll_longitude; latitude has no equirectangular equivalent so
-        # we offset the *placement* vertically instead. +lat looks up, so
-        # the map slides down.
-        map_x = (virtual_w - map_w) // 2
-        map_y = (virtual_h - map_h) // 2 + int(round(center_lat / 90.0 * map_h / 2))
+        # Explicit position (from spinboxes) wins if either coord is
+        # non-zero; otherwise auto-centre and shift by focal latitude.
+        # +lat looks up, so the map slides down.
+        if map_pos_x != 0 or map_pos_y != 0:
+            map_x = map_pos_x
+            map_y = map_pos_y
+        else:
+            map_x = (virtual_w - map_w) // 2
+            map_y = (virtual_h - map_h) // 2 + int(round(center_lat / 90.0 * map_h / 2))
         render_w, render_h = map_w, map_h
     else:
         render_w, render_h = width, height

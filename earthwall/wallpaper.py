@@ -62,7 +62,18 @@ def _run(cmd: list[str]) -> bool:
         return False
 
 
-def set_wallpaper(image_path: str | Path, desktop: str | None = None) -> bool:
+def set_wallpaper(image_path: str | Path, desktop: str | None = None,
+                    spanned: bool = False) -> bool:
+    """Apply `image_path` as the desktop wallpaper.
+
+    `spanned=True` asks the DE to stretch a single image across all
+    monitors as one continuous surface (rather than the default of
+    duplicating it or centring per-monitor). Used by span/independent
+    monitor modes so an image sized to the virtual desktop shows the
+    right pixels on the right screens. Falls back gracefully when the
+    running DE has no equivalent option - the image is applied in the
+    DE's default mode and the caller gets a normal `True`.
+    """
     image_path = str(Path(image_path).resolve())
     uri = f"file://{image_path}"
     desktop = desktop or detect_desktop()
@@ -73,11 +84,22 @@ def set_wallpaper(image_path: str | Path, desktop: str | None = None) -> bool:
         # GNOME 42+ also has a separate dark-mode wallpaper key.
         _run(["gsettings", "set", "org.gnome.desktop.background",
               "picture-uri-dark", uri])
+        # In span mode the image is already sized to the whole virtual
+        # desktop, so we ask GNOME to stretch it across all monitors as
+        # one surface instead of tiling / centring per monitor.
+        # "spanned" is a stock picture-options value since GNOME 3.
+        if spanned:
+            _run(["gsettings", "set", "org.gnome.desktop.background",
+                  "picture-options", "spanned"])
         return ok
 
     if desktop == "cinnamon":
-        return _run(["gsettings", "set", "org.cinnamon.desktop.background",
-                     "picture-uri", uri])
+        ok = _run(["gsettings", "set", "org.cinnamon.desktop.background",
+                   "picture-uri", uri])
+        if spanned:
+            _run(["gsettings", "set", "org.cinnamon.desktop.background",
+                  "picture-options", "spanned"])
+        return ok
 
     if desktop == "kde":
         # Plasma 6 ships a CLI helper for exactly this. Fall back to the
@@ -118,18 +140,36 @@ def set_wallpaper(image_path: str | Path, desktop: str | None = None) -> bool:
         return ok
 
     if desktop == "mate":
-        return _run(["gsettings", "set", "org.mate.background",
-                     "picture-filename", image_path])
+        ok = _run(["gsettings", "set", "org.mate.background",
+                   "picture-filename", image_path])
+        if spanned:
+            _run(["gsettings", "set", "org.mate.background",
+                  "picture-options", "spanned"])
+        return ok
 
     if desktop == "sway":
         if shutil.which("swaybg"):
             subprocess.Popen(["pkill", "swaybg"])
-            subprocess.Popen(["swaybg", "-i", image_path, "-m", "fill"])
+            # `fit` shows the spanned image at true 1:1 across the whole
+            # output; `fill` would crop. Only relevant when spanned=True,
+            # but swaybg has no dedicated span mode - it applies to each
+            # output separately. Users on Wayland WMs with true spanning
+            # (Hyprland, river) will need to configure their compositor.
+            mode = "fit" if spanned else "fill"
+            subprocess.Popen(["swaybg", "-i", image_path, "-m", mode])
             return True
         return False
 
     # Generic X11 fallback - works on most lightweight WMs (i3, bspwm, etc).
     if shutil.which("feh"):
-        return _run(["feh", "--bg-fill", image_path])
+        # feh's --bg-fill scales-and-crops per-monitor by default; --bg-max
+        # scales to fit within each monitor. For a spanned image we want
+        # neither - --no-xinerama treats all outputs as one big screen so
+        # the image gets applied end-to-end across monitors.
+        cmd = ["feh"]
+        if spanned:
+            cmd.append("--no-xinerama")
+        cmd += ["--bg-fill", image_path]
+        return _run(cmd)
 
     return False

@@ -471,14 +471,56 @@ class MainWindow(QMainWindow):
         # Void fill: colour picker for the area outside the map when the
         # map doesn't cover the full virtual desktop (zoomed in, or
         # diagonal monitor layout with gaps).
+        # Void fill: either a colour swatch (click for QColorDialog) or a
+        # background image (click to browse). Image takes precedence over
+        # colour when set - the label next to them shows which is active.
         void_row = QHBoxLayout()
         void_row.addWidget(QLabel("Fill empty screen area with:"))
         self.void_fill_btn = QPushButton()
         self.void_fill_btn.setFixedWidth(60)
+        self.void_fill_btn.setToolTip("Pick a solid colour")
         self.void_fill_btn.clicked.connect(self._pick_void_fill_color)
         void_row.addWidget(self.void_fill_btn)
+        self.void_fill_image_btn = QPushButton("Image…")
+        self.void_fill_image_btn.setToolTip(
+            "Pick a background image; clears when unset")
+        self.void_fill_image_btn.clicked.connect(self._pick_void_fill_image)
+        void_row.addWidget(self.void_fill_image_btn)
+        self.void_fill_clear_btn = QPushButton("Clear image")
+        self.void_fill_clear_btn.clicked.connect(self._clear_void_fill_image)
+        void_row.addWidget(self.void_fill_clear_btn)
+        self.void_fill_status = QLabel("colour")
+        self.void_fill_status.setStyleSheet("color:#888; font-size:11px;")
+        void_row.addWidget(self.void_fill_status)
         void_row.addStretch()
         map_area_layout.addLayout(void_row)
+
+        # Position / Size spinboxes - EarthView-style manual placement.
+        # These live alongside the zoom slider: zoom sizes the map, X/Y
+        # positions it within the virtual desktop. Both are stored on
+        # monitor #0's config (mapped to "spanned map" in span mode).
+        # Advanced users can pin exact numbers; casual users can ignore
+        # them and just drag the focal dot / move the zoom slider.
+        placement_row = QHBoxLayout()
+        placement_row.addWidget(QLabel("Map position X:"))
+        self.map_pos_x_spin = QSpinBox()
+        self.map_pos_x_spin.setRange(-30000, 30000)
+        self.map_pos_x_spin.setSuffix(" px")
+        self.map_pos_x_spin.valueChanged.connect(self._on_settings_changed)
+        placement_row.addWidget(self.map_pos_x_spin)
+        placement_row.addWidget(QLabel("Y:"))
+        self.map_pos_y_spin = QSpinBox()
+        self.map_pos_y_spin.setRange(-30000, 30000)
+        self.map_pos_y_spin.setSuffix(" px")
+        self.map_pos_y_spin.valueChanged.connect(self._on_settings_changed)
+        placement_row.addWidget(self.map_pos_y_spin)
+        self.map_pos_auto_btn = QPushButton("Auto-center")
+        self.map_pos_auto_btn.setToolTip(
+            "Reset X/Y so the map is centred on the virtual desktop")
+        self.map_pos_auto_btn.clicked.connect(self._auto_center_map_position)
+        placement_row.addWidget(self.map_pos_auto_btn)
+        placement_row.addStretch()
+        map_area_layout.addLayout(placement_row)
 
         outer.addWidget(map_area_box)
         outer.addStretch()
@@ -556,13 +598,72 @@ class MainWindow(QMainWindow):
             set_monitor_config(self.settings, 0, cfg)
             settings_module.save_settings(self.settings)
             self._refresh_void_fill_swatch()
+            self._schedule_preview_update()
+
+    def _pick_void_fill_image(self) -> None:
+        from PySide6.QtWidgets import QFileDialog
+        from .monitors import monitor_config_for, set_monitor_config
+        cfg = monitor_config_for(self.settings, 0)
+        start_dir = cfg.get("void_fill_image") or ""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Pick a background image", start_dir,
+            "Images (*.png *.jpg *.jpeg *.bmp *.webp)")
+        if path:
+            cfg["void_fill_image"] = path
+            set_monitor_config(self.settings, 0, cfg)
+            settings_module.save_settings(self.settings)
+            self._refresh_void_fill_swatch()
+            self._schedule_preview_update()
+
+    def _clear_void_fill_image(self) -> None:
+        from .monitors import monitor_config_for, set_monitor_config
+        cfg = monitor_config_for(self.settings, 0)
+        if cfg.get("void_fill_image"):
+            cfg["void_fill_image"] = None
+            set_monitor_config(self.settings, 0, cfg)
+            settings_module.save_settings(self.settings)
+            self._refresh_void_fill_swatch()
+            self._schedule_preview_update()
 
     def _refresh_void_fill_swatch(self) -> None:
         from .monitors import monitor_config_for
-        color = monitor_config_for(self.settings, 0)["void_fill_color"]
+        cfg = monitor_config_for(self.settings, 0)
+        color = cfg["void_fill_color"]
         self.void_fill_btn.setStyleSheet(
             f"background-color: {color}; border: 1px solid #666;")
         self.void_fill_btn.setText("")
+        # Show the user which void fill is active so it's obvious why
+        # clicking the colour swatch doesn't change what they see when an
+        # image is set (image takes precedence in the renderer).
+        img = cfg.get("void_fill_image")
+        if hasattr(self, "void_fill_status"):
+            if img:
+                from pathlib import Path
+                self.void_fill_status.setText(
+                    f"using image: {Path(img).name}")
+            else:
+                self.void_fill_status.setText("using colour")
+        if hasattr(self, "void_fill_clear_btn"):
+            self.void_fill_clear_btn.setEnabled(bool(img))
+
+    def _auto_center_map_position(self) -> None:
+        """Reset map position spinboxes so the map is centred on the
+        virtual desktop for the current zoom - the sensible default."""
+        layout = getattr(self, "_current_layout", None)
+        if layout is None:
+            return
+        zoom = self.map_zoom_slider.value() / 100.0
+        map_w = int(round(layout.virtual_width * zoom))
+        map_h = int(round(layout.virtual_height * zoom))
+        cx = (layout.virtual_width - map_w) // 2
+        cy = (layout.virtual_height - map_h) // 2
+        # blockSignals so we don't fire two settings-changed events - the
+        # final _on_settings_changed call after both spinboxes update
+        # runs once via the normal signal, keeping things debounced.
+        self.map_pos_x_spin.blockSignals(True)
+        self.map_pos_x_spin.setValue(cx)
+        self.map_pos_x_spin.blockSignals(False)
+        self.map_pos_y_spin.setValue(cy)  # this one fires the signal
 
     def _build_cities_tab(self) -> QWidget:
         w = QWidget()
@@ -645,6 +746,13 @@ class MainWindow(QMainWindow):
             self.map_zoom_slider.setValue(int(cfg["zoom"] * 100))
             self.map_zoom_slider.blockSignals(False)
             self.map_zoom_value_label.setText(f"{self.map_zoom_slider.value()}%")
+            if hasattr(self, "map_pos_x_spin"):
+                self.map_pos_x_spin.blockSignals(True)
+                self.map_pos_x_spin.setValue(int(cfg.get("map_pos_x", 0)))
+                self.map_pos_x_spin.blockSignals(False)
+                self.map_pos_y_spin.blockSignals(True)
+                self.map_pos_y_spin.setValue(int(cfg.get("map_pos_y", 0)))
+                self.map_pos_y_spin.blockSignals(False)
             self._refresh_void_fill_swatch()
         if hasattr(self, "map_focal_preview"):
             self.map_focal_preview.set_focal(
@@ -726,6 +834,12 @@ class MainWindow(QMainWindow):
             from .monitors import monitor_config_for, set_monitor_config
             cfg = monitor_config_for(self.settings, 0)
             cfg["zoom"] = zoom_pct / 100.0
+            # Persist the position spinboxes alongside zoom - they're
+            # part of the same "how does the map sit on the desktop"
+            # concept and the renderer uses them together.
+            if hasattr(self, "map_pos_x_spin"):
+                cfg["map_pos_x"] = int(self.map_pos_x_spin.value())
+                cfg["map_pos_y"] = int(self.map_pos_y_spin.value())
             set_monitor_config(self.settings, 0, cfg)
             self._update_screen_area_preview()
         self.settings["center_lon"] = float(self.center_lon_spin.value())

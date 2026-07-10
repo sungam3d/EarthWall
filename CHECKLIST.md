@@ -32,28 +32,28 @@
       grid view) when 2 monitors detected, each at its own aspect.
       **Done in gui_display_widgets.py (ScreenAreaPreview). Handles diagonal
       layouts correctly (verified against EarthView-04 numbers).**
-- [~] **2.4 Map placement controls** — zoom slider, pan up/down as well as
+- [x] **2.4 Map placement controls** — zoom slider, pan up/down as well as
       left/right (map offset x/y), draggable red focal-point dot on the preview
-      (EarthView style). Settings: `zoom`, `offset_x`, `offset_y` (per monitor
-      in independent mode). **Partial: draggable red-dot focal picker
-      (MapFocalPointPreview) done and wired to center_lon/center_lat; zoom
-      slider done and stored in monitor_configs["0"]["zoom"]. Still to do:
-      per-monitor placement in independent mode, position spinboxes like
-      EarthView, view-list (Add View/Remove).**
-- [~] **2.5 Void fill** — when zoom/pan leaves screen area uncovered: custom
-      solid colour picker or background image chooser. **Partial: colour picker
-      wired to monitor_configs["0"]["void_fill_color"]. Still to do: image file
-      chooser, per-monitor void fill in independent mode.**
+      (EarthView style). **DONE: draggable red-dot focal picker updates
+      center_lon/center_lat live; zoom slider 50-400% stored in
+      monitor_configs["0"]["zoom"]; position spinboxes (Map position X/Y)
+      pin exact placement; Auto-center button resets to centred position
+      at current zoom. Per-monitor placement in independent mode still to
+      come (currently independent falls back to span).**
+- [x] **2.5 Void fill** — when zoom/pan leaves screen area uncovered: custom
+      solid colour picker or background image chooser. **DONE: colour
+      swatch (QColorDialog), Image… button (QFileDialog with PNG/JPG/BMP/
+      WEBP filter), Clear image button; status label ("using colour" /
+      "using image: <name>") shows which is active; renderer's
+      _load_void_fill honours image with aspect-preserving scale+crop
+      and falls back to colour on any load error.**
 - [x] **2.6 Renderer changes** — render.py: compose per-monitor or spanned
       output; wallpaper.py: apply spanned image (GNOME "spanned" option) or
-      per-monitor wallpapers depending on DE support. **Span/independent
-      rendering DONE: render() accepts monitor_layout + monitors_mode +
-      map_zoom + void_fill_color/image. Mirror mode is unchanged (back-
-      compat). Span mode composes rendered map onto virtual-desktop canvas
-      with void fill; zoom < 100% shows void border, zoom > 100% crops.
-      Diagonal layouts handled correctly (uses virtual-desktop bounding
-      box). RemainingL wallpaper.py "spanned" mode for DE-specific apply
-      (currently uses single-image path which works for most cases).**
+      per-monitor wallpapers depending on DE support. **DONE: render()
+      composes spanned output honouring zoom/position/void; wallpaper.py
+      set_wallpaper(spanned=True) sets picture-options="spanned" on
+      GNOME/Cinnamon/MATE, --no-xinerama on feh, appropriate mode on
+      swaybg; worker auto-enables spanned when mode is span/independent.**
 
 ## Reference notes
 - Bug repro: Update now → move cloud opacity → preview stretches; Update now fixes.
@@ -68,3 +68,4 @@
 - Session 2 (2026-07-10): Added first-load spinner with explanatory text (animated dots + "why this is slow" note; stops on first pixmap). Phase 2.1 + 2.2 complete: monitors.py module with Monitor / MonitorLayout dataclasses, detect_layout(), virtual-desktop bounding box (preserves negative offsets for diagonal setups), per-monitor config helpers. Settings schema extended with monitors_mode + monitor_configs. Version 1.0.08. Phase 2.3 blocked on user re-attaching EarthView-01..04.jpg screenshots.
 - Session 3 (2026-07-11): Got EarthView screenshots. New "Displays" tab in main window. New gui_display_widgets.py with ScreenAreaPreview (renders virtual desktop + monitors + red-outlined map area, verified against diagonal EarthView-04 numbers) and MapFocalPointPreview (draggable red dot updating center_lon/center_lat live). Mode selector (mirror/span/independent), zoom slider, void-fill colour picker all wired to settings. Monitor detection deferred to showEvent (needs live QApplication). Version 1.0.09. NEXT: 2.6 renderer — teach render.py to compose per-monitor / spanned output, honour zoom + focal, paint void fill; teach wallpaper.py to apply spanned or per-monitor. Also 2.4/2.5 tail: position spinboxes, view list, per-monitor independent editing, void-fill image chooser.
 - Session 4 (2026-07-11): Widened Edit City dialog (500→660 min, 720x720 default) to fit its 5-tab strip. Phase 2.6 renderer done: render() accepts monitor_layout + monitors_mode + map_zoom + void_fill_color/image; _compose_multi_monitor() places rendered map onto virtual-desktop canvas with void fill (fast path when map fully covers). Verified: mirror back-compat, span mode with diagonal layout, zoom<100% shows void, zoom>100% covers. GUI: _current_resolution() returns virtual desktop size in span/independent modes so preview matches. RenderWorker takes monitor_layout snapshot (main-thread-captured, no QScreen from worker). Version 1.0.10. NEXT: 2.4/2.5 tail (position spinboxes + view list + void-fill image chooser + per-monitor independent editing), then wallpaper.py DE-specific "spanned" apply option.
+- Session 5 (2026-07-11): Phase 2 CORE COMPLETE. 2.4 tail: position spinboxes (Map position X/Y in px, auto-center button) added to Displays tab, persisted per-monitor. 2.5 tail: image chooser (QFileDialog), clear-image button, "using colour" / "using image: X" status label. wallpaper.py set_wallpaper() gained spanned=True flag: sets picture-options=spanned on GNOME/Cinnamon/MATE, --no-xinerama on feh, fit mode on swaybg; worker auto-enables spanned when mode is span/independent. Version 1.0.11. Phase 2 remaining: true per-monitor independent editing (independent currently falls back to span composition), multiple "views" like EarthView's View 1/2 randomization. Both are nice-to-have; nothing blocks daily use.

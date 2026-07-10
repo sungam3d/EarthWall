@@ -82,6 +82,10 @@ class RenderWorker(QThread):
                 monitor_layout=self.monitor_layout,
                 map_zoom=(self.settings.get("monitor_configs", {})
                           .get("0", {}).get("zoom", 1.0)),
+                map_pos_x=(self.settings.get("monitor_configs", {})
+                           .get("0", {}).get("map_pos_x", 0)),
+                map_pos_y=(self.settings.get("monitor_configs", {})
+                           .get("0", {}).get("map_pos_y", 0)),
                 void_fill_color=(self.settings.get("monitor_configs", {})
                                  .get("0", {}).get("void_fill_color", "#000000")),
                 void_fill_image=(self.settings.get("monitor_configs", {})
@@ -89,7 +93,13 @@ class RenderWorker(QThread):
             )
 
             if self.apply_wallpaper:
-                set_wallpaper(self.output_path)
+                # Use spanned mode when the render was composed at
+                # virtual-desktop dimensions, so DEs stretch it as one
+                # image across all monitors rather than tiling per screen.
+                spanned = (self.settings.get("monitors_mode", "mirror")
+                           in ("span", "independent")
+                           and self.monitor_layout is not None)
+                set_wallpaper(self.output_path, spanned=spanned)
 
             self.finished_ok.emit(self.output_path)
         except Exception as e:  # noqa: BLE001 - surface any failure to the GUI
