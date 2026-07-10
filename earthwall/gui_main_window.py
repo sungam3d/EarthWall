@@ -404,8 +404,10 @@ class MainWindow(QMainWindow):
         self.monitors_mode_combo.currentIndexChanged.connect(self._on_settings_changed)
         mode_form.addRow("Mode:", self.monitors_mode_combo)
         self.monitors_mode_note = QLabel(
-            "Span and Independent modes preview here now; the wallpaper "
-            "output honours the selected mode as of this release."
+            "Span composes one wide map across all monitors, filling any "
+            "gaps (diagonal layouts, zoom < 100%) with the void colour "
+            "below. Independent currently renders like Span; per-monitor "
+            "independent views land in a later revision."
         )
         self.monitors_mode_note.setWordWrap(True)
         self.monitors_mode_note.setStyleSheet("color:#888; font-size:11px;")
@@ -676,9 +678,28 @@ class MainWindow(QMainWindow):
         self.pause_btn.blockSignals(False)
 
     def _current_resolution(self) -> tuple[int, int]:
+        # In multi-monitor "span"/"independent" modes the render target
+        # IS the virtual desktop, not any single monitor. This makes both
+        # the preview and the applied wallpaper come out at the right
+        # shape without the user having to fiddle with the resolution
+        # spinboxes to match their virtual-desktop dimensions manually.
+        mode = self.settings.get("monitors_mode", "mirror") if hasattr(self, "settings") else "mirror"
+        layout = getattr(self, "_current_layout", None)
+        if mode in ("span", "independent") and layout is not None and layout.virtual_width > 0:
+            return layout.virtual_width, layout.virtual_height
         if self.resolution_combo.currentIndex() == 0:
             return _detect_resolution()
         return self.width_spin.value(), self.height_spin.value()
+
+    def _render_layout(self):
+        """The MonitorLayout the render workers should honour, or None
+        for pure mirror mode (skips the whole multi-monitor code path
+        and keeps the classic single-image render fast for users on one
+        monitor with mirror mode)."""
+        mode = self.settings.get("monitors_mode", "mirror")
+        if mode == "mirror":
+            return None
+        return getattr(self, "_current_layout", None)
 
     def _on_settings_changed(self, *_args) -> None:
         if self._initializing:
@@ -931,6 +952,7 @@ class MainWindow(QMainWindow):
         self._worker = RenderWorker(
             dict(self.settings), list(self.cities), str(output_path),
             width, height, apply_wallpaper=True,
+            monitor_layout=self._render_layout(),
         )
         self._worker.finished_ok.connect(self._on_render_done)
         self._worker.finished_err.connect(self._on_render_error)
@@ -951,6 +973,7 @@ class MainWindow(QMainWindow):
         self._preview_worker = RenderWorker(
             dict(self.settings), list(self.cities), str(PREVIEW_OUTPUT),
             pw, ph, apply_wallpaper=False,
+            monitor_layout=self._render_layout(),
         )
         self._preview_worker.finished_ok.connect(self._on_preview_render_done)
         self._preview_worker.finished_err.connect(self._on_render_error)

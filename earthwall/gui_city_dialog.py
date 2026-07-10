@@ -161,8 +161,14 @@ class CityDialog(QDialog):
     def __init__(self, parent=None, existing: dict | None = None):
         super().__init__(parent)
         self.setWindowTitle("Edit City" if existing else "Add City")
-        self.setMinimumWidth(500)
-        self.resize(520, 640)
+        # Five tabs across the top ("Basics", "Marker", "Placement",
+        # "Layout", "Text styling") need more room than the previous 500px
+        # allowed - the last tab labels were being elided on some styles
+        # and several inner rows (font family + size + weight combos)
+        # were cramped. 660 fits the full tab strip comfortably on every
+        # platform theme I could test.
+        self.setMinimumWidth(660)
+        self.resize(720, 720)
         e = existing or {}
         self._marker_color = QColor(*e.get("color", [255, 210, 60]))
 

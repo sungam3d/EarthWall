@@ -21,7 +21,8 @@ class RenderWorker(QThread):
     finished_err = Signal(str)  # emits an error message on failure
 
     def __init__(self, settings: dict, cities: list[dict], output_path: str,
-                 width: int, height: int, apply_wallpaper: bool = True):
+                 width: int, height: int, apply_wallpaper: bool = True,
+                 monitor_layout=None):
         super().__init__()
         self.settings = settings
         self.cities = cities
@@ -29,6 +30,12 @@ class RenderWorker(QThread):
         self.width = width
         self.height = height
         self.apply_wallpaper = apply_wallpaper
+        # Optional MonitorLayout snapshot. When present the render honours
+        # monitors_mode / zoom / focal / void fill; when None the render
+        # runs in classic single-image mode. Layout is captured on the
+        # main thread and passed in - QScreen access from a worker thread
+        # is unsupported on some platforms.
+        self.monitor_layout = monitor_layout
 
     def _gather_weather(self) -> dict:
         """Fetch weather for any city with show_weather set. Uses the
@@ -69,6 +76,16 @@ class RenderWorker(QThread):
                 night_view=self.settings.get("night_view", True),
                 temp_units=self.settings.get("temp_units", "C"),
                 weather_by_city=weather_by_city,
+                # --- Multi-monitor (Phase 2.6) ---
+                center_lat=self.settings.get("center_lat", 0.0),
+                monitors_mode=self.settings.get("monitors_mode", "mirror"),
+                monitor_layout=self.monitor_layout,
+                map_zoom=(self.settings.get("monitor_configs", {})
+                          .get("0", {}).get("zoom", 1.0)),
+                void_fill_color=(self.settings.get("monitor_configs", {})
+                                 .get("0", {}).get("void_fill_color", "#000000")),
+                void_fill_image=(self.settings.get("monitor_configs", {})
+                                 .get("0", {}).get("void_fill_image")),
             )
 
             if self.apply_wallpaper:
