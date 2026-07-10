@@ -100,6 +100,18 @@ class ScreenAreaPreview(QWidget):
         return s, ox, oy
 
     def paintEvent(self, _event) -> None:
+        # A raised exception inside a Qt paintEvent can hard-crash the
+        # process on some platforms (notably Windows), with no traceback.
+        # Guard the whole thing: worst case we skip a frame, and the
+        # error is logged by the global excepthook via the re-raise-free
+        # path below.
+        try:
+            self._paint(_event)
+        except Exception:
+            import logging
+            logging.exception("ScreenAreaPreview paint failed")
+
+    def _paint(self, _event) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
         # Widget background: solid dark, slightly rounded like EarthView.
@@ -254,6 +266,13 @@ class MapFocalPointPreview(QWidget):
 
     # ----- painting ----------------------------------------------------
     def paintEvent(self, _event) -> None:
+        try:
+            self._paint(_event)
+        except Exception:
+            import logging
+            logging.exception("MapFocalPointPreview paint failed")
+
+    def _paint(self, _event) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
         p.fillRect(self.rect(), _VIRTUAL_BG)

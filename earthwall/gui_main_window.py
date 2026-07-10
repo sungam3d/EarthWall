@@ -399,14 +399,12 @@ class MainWindow(QMainWindow):
         # row when a QComboBox lives inside a QScrollArea (which every
         # tab does now). Setting a generous max visible count + a real
         # minimum contents length forces Qt to size the popup properly
-        # for all three items, on every platform theme.
+        # for all three items, on every platform theme. (An earlier fix
+        # here also swapped in a bare QListView as the popup view, but
+        # that risked the view being garbage-collected on PySide6 - the
+        # two setters below are sufficient on their own.)
         self.monitors_mode_combo.setMaxVisibleItems(10)
         self.monitors_mode_combo.setMinimumContentsLength(38)
-        # Give the combo an ItemView so the popup detaches cleanly from
-        # the scroll area's viewport - some styles otherwise inherit the
-        # viewport's clip region and hide rows.
-        from PySide6.QtWidgets import QListView
-        self.monitors_mode_combo.setView(QListView())
         self.monitors_mode_combo.addItem(
             "Mirror  —  same map on every monitor", "mirror")
         self.monitors_mode_combo.addItem(
@@ -563,8 +561,16 @@ class MainWindow(QMainWindow):
         return w
 
     def _refresh_monitor_layout(self) -> None:
-        from .monitors import detect_layout
-        layout = detect_layout()
+        from .monitors import detect_layout, _fallback_layout
+        try:
+            layout = detect_layout()
+        except Exception:
+            # Never let a display-detection hiccup (common right when the
+            # user toggles 'Extend these displays' on Windows) take down
+            # the whole app - fall back to a safe single-monitor layout.
+            import logging
+            logging.exception("Monitor detection failed; using fallback")
+            layout = _fallback_layout()
         self._current_layout = layout
         parts = []
         for m in layout.monitors:

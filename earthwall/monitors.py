@@ -112,20 +112,48 @@ def detect_layout() -> MonitorLayout:
         # app just to introspect screens. Return the safe fallback.
         return _fallback_layout()
 
-    screens = app.screens()
+    try:
+        screens = app.screens()
+    except Exception:
+        return _fallback_layout()
     if not screens:
         return _fallback_layout()
 
-    primary = app.primaryScreen()
+    try:
+        primary = app.primaryScreen()
+    except Exception:
+        primary = None
+
     monitors: list[Monitor] = []
     for i, s in enumerate(screens):
-        g = s.geometry()
-        monitors.append(Monitor(
-            index=i,
-            name=s.name() or f"Display {i + 1}",
-            x=g.x(), y=g.y(), width=g.width(), height=g.height(),
-            is_primary=(s is primary),
-        ))
+        try:
+            g = s.geometry()
+            w, h = g.width(), g.height()
+            # A screen can momentarily report a zero/negative size while
+            # Windows is mid-reconfiguration (exactly when the user flips
+            # to 'Extend these displays'). Skip such phantom screens
+            # rather than letting a 0 propagate into a divisor later.
+            if w <= 0 or h <= 0:
+                continue
+            try:
+                name = s.name() or f"Display {i + 1}"
+            except Exception:
+                name = f"Display {i + 1}"
+            monitors.append(Monitor(
+                index=i, name=name,
+                x=g.x(), y=g.y(), width=w, height=h,
+                is_primary=(s is primary),
+            ))
+        except Exception:
+            # One bad screen shouldn't sink detection of the others.
+            continue
+
+    if not monitors:
+        return _fallback_layout()
+    # Guarantee at least one monitor is flagged primary (on some setups
+    # primaryScreen() can be None right after a hot-plug).
+    if not any(m.is_primary for m in monitors):
+        monitors[0].is_primary = True
 
     # Virtual desktop bounding box - min corner to max corner across ALL
     # monitors. Preserves negative offsets (monitor left/above primary).
@@ -133,10 +161,13 @@ def detect_layout() -> MonitorLayout:
     min_y = min(m.y for m in monitors)
     max_x = max(m.x + m.width for m in monitors)
     max_y = max(m.y + m.height for m in monitors)
+    vw, vh = max_x - min_x, max_y - min_y
+    if vw <= 0 or vh <= 0:  # paranoia - should be impossible now
+        return _fallback_layout()
     return MonitorLayout(
         monitors=monitors,
         virtual_x=min_x, virtual_y=min_y,
-        virtual_width=max_x - min_x, virtual_height=max_y - min_y,
+        virtual_width=vw, virtual_height=vh,
     )
 
 

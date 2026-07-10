@@ -25,6 +25,59 @@ if not TRAY_ICON_PATH.exists():
     TRAY_ICON_PATH = ICON_PATH
 
 
+def _install_crash_logger() -> "Path":
+    """Route otherwise-fatal uncaught exceptions to a log file and a
+    dialog instead of letting the process vanish silently.
+
+    Before this, an unhandled exception (e.g. from a paintEvent on
+    Windows) would terminate the app with nothing on screen and nothing
+    written anywhere, making 'it just crashes' impossible to diagnose.
+    Now the traceback lands in earthwall_crash.log next to the settings
+    file, and - if a QApplication exists - a message box shows the user
+    what happened and where the log is."""
+    import logging
+    import traceback as _tb
+    from .settings import CONFIG_DIR
+
+    log_path = Path(CONFIG_DIR) / "earthwall_crash.log"
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+    logging.basicConfig(
+        filename=str(log_path),
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
+
+    def _hook(exc_type, exc_value, exc_tb):
+        # Let Ctrl-C behave normally.
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_tb)
+            return
+        text = "".join(_tb.format_exception(exc_type, exc_value, exc_tb))
+        logging.error("Uncaught exception:\n%s", text)
+        sys.stderr.write(text)
+        try:
+            from PySide6.QtWidgets import QApplication, QMessageBox
+            if QApplication.instance() is not None:
+                box = QMessageBox()
+                box.setIcon(QMessageBox.Critical)
+                box.setWindowTitle("EarthWall error")
+                box.setText("EarthWall hit an unexpected error.")
+                box.setInformativeText(
+                    f"Details were written to:\n{log_path}\n\n"
+                    "The app will try to keep running.")
+                box.setDetailedText(text)
+                box.exec()
+        except Exception:
+            pass  # never let the crash handler itself crash
+
+    sys.excepthook = _hook
+    return log_path
+
+
 def main() -> None:
     try:
         autostart.register_in_app_menu()
