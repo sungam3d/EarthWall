@@ -30,7 +30,7 @@ def enable() -> None:
     module_dir = Path(__file__).resolve().parent.parent
     content = f"""[Desktop Entry]
 Type=Application
-Name=Earthwall
+Name=EarthWall
 Comment=Live real-time Earth wallpaper
 Exec=env PYTHONPATH={module_dir} {_launch_command()}
 Path={module_dir}
@@ -52,14 +52,14 @@ APPLICATIONS_FILE = APPLICATIONS_DIR / "earthwall-gui.desktop"
 
 
 def register_in_app_menu() -> None:
-    """Adds Earthwall to the normal application launcher/menu (separate
+    """Adds EarthWall to the normal application launcher/menu (separate
     from the autostart-at-login setting). Safe to call every launch -
     it just overwrites the same file each time."""
     APPLICATIONS_DIR.mkdir(parents=True, exist_ok=True)
     module_dir = Path(__file__).resolve().parent.parent
     content = f"""[Desktop Entry]
 Type=Application
-Name=Earthwall
+Name=EarthWall
 Comment=Live real-time Earth wallpaper
 Exec=env PYTHONPATH={module_dir} {_launch_command()}
 Path={module_dir}

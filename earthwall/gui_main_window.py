@@ -53,7 +53,7 @@ def _detect_resolution() -> tuple[int, int]:
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Earthwall")
+        self.setWindowTitle("EarthWall")
         self.setMinimumSize(720, 640)
 
         self.settings = settings_module.load_settings()
@@ -95,18 +95,37 @@ class MainWindow(QMainWindow):
         # --- Preview -----------------------------------------------------
         preview_box = QGroupBox("Preview")
         preview_layout = QVBoxLayout(preview_box)
-        self.preview_label = QLabel("No preview yet - rendering…")
-        self.preview_label.setAlignment(Qt.AlignCenter)
-        self.preview_label.setMinimumHeight(220)
-        self.preview_label.setStyleSheet("background:#111; color:#888; border-radius:6px;")
-        preview_layout.addWidget(self.preview_label)
 
-        self.progress = QProgressBar()
+        # The preview label and the progress bar live in a stacked
+        # container so the progress bar can overlay the bottom of the
+        # preview instead of pushing everything below it. Otherwise
+        # showing/hiding the bar causes the preview window to jump around
+        # by 4-10 pixels every time a render starts or finishes - very
+        # noticeable while dragging sliders.
+        self.preview_container = QWidget()
+        self.preview_container.setMinimumHeight(220)
+        container_layout = QVBoxLayout(self.preview_container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.preview_label = QLabel("No preview yet - rendering…", self.preview_container)
+        self.preview_label.setAlignment(Qt.AlignCenter)
+        self.preview_label.setStyleSheet("background:#111; color:#888; border-radius:6px;")
+        container_layout.addWidget(self.preview_label)
+
+        # Parented to the container (not added to a layout) so we can
+        # position it manually as an overlay - see _position_progress_bar.
+        self.progress = QProgressBar(self.preview_container)
         self.progress.setRange(0, 0)  # indeterminate/"busy" animation
         self.progress.setTextVisible(False)
         self.progress.setFixedHeight(4)
+        self.progress.setStyleSheet(
+            "QProgressBar { background: rgba(0,0,0,0); border: none; }"
+            "QProgressBar::chunk { background-color: #4a9eff; border-radius: 2px; }"
+        )
         self.progress.hide()
-        preview_layout.addWidget(self.progress)
+        self.progress.raise_()
+
+        preview_layout.addWidget(self.preview_container)
 
         preview_btn_row = QHBoxLayout()
         self.status_label = QLabel("Not updated yet")
@@ -184,6 +203,15 @@ class MainWindow(QMainWindow):
         clouds_layout.addLayout(opacity_row)
         layout.addWidget(clouds_box)
 
+        temp_box = QGroupBox("City weather display")
+        temp_form = QFormLayout(temp_box)
+        self.temp_units_combo = QComboBox()
+        self.temp_units_combo.addItem("Celsius (°C)", "C")
+        self.temp_units_combo.addItem("Fahrenheit (°F)", "F")
+        self.temp_units_combo.currentIndexChanged.connect(self._on_settings_changed)
+        temp_form.addRow("Temperature units:", self.temp_units_combo)
+        layout.addWidget(temp_box)
+
         layout.addStretch()
         return w
 
@@ -252,6 +280,25 @@ class MainWindow(QMainWindow):
         self.twilight_value_label.setMinimumWidth(28)
         twilight_layout.addWidget(self.twilight_value_label)
         layout.addWidget(twilight_box)
+
+        night_box = QGroupBox("Night side darkness")
+        night_layout = QHBoxLayout(night_box)
+        night_layout.addWidget(QLabel("Show landscape"))
+        self.night_darkness_slider = QSlider(Qt.Horizontal)
+        self.night_darkness_slider.setRange(0, 100)
+        self.night_darkness_slider.setToolTip(
+            "How dark the unlit night side gets. Higher = deeper black with "
+            "just city lights showing; lower = you can still faintly see the "
+            "landscape underneath (the old default)."
+        )
+        self.night_darkness_slider.valueChanged.connect(self._on_settings_changed)
+        night_layout.addWidget(self.night_darkness_slider)
+        night_layout.addWidget(QLabel("Fully dark"))
+        self.night_darkness_value_label = QLabel("")
+        self.night_darkness_value_label.setStyleSheet("color:#888;")
+        self.night_darkness_value_label.setMinimumWidth(40)
+        night_layout.addWidget(self.night_darkness_value_label)
+        layout.addWidget(night_box)
 
         layout.addStretch()
         return w
@@ -325,6 +372,18 @@ class MainWindow(QMainWindow):
         self.twilight_slider.blockSignals(False)
         self.twilight_value_label.setText(f"{self.twilight_slider.value()}°")
 
+        self.night_darkness_slider.blockSignals(True)
+        self.night_darkness_slider.setValue(int(s.get("night_darkness", 0.85) * 100))
+        self.night_darkness_slider.blockSignals(False)
+        self.night_darkness_value_label.setText(f"{self.night_darkness_slider.value()}%")
+
+        self.temp_units_combo.blockSignals(True)
+        units = s.get("temp_units", "C")
+        for i in range(self.temp_units_combo.count()):
+            if self.temp_units_combo.itemData(i) == units:
+                self.temp_units_combo.setCurrentIndex(i); break
+        self.temp_units_combo.blockSignals(False)
+
         self.pause_btn.blockSignals(True)
         self.pause_btn.setChecked(s["paused"])
         self.pause_btn.setText("Resume Auto-Update" if s["paused"] else "Pause Auto-Update")
@@ -348,6 +407,9 @@ class MainWindow(QMainWindow):
         self.settings["center_lon"] = float(self.center_lon_spin.value())
         self.settings["twilight_width_deg"] = float(self.twilight_slider.value())
         self.twilight_value_label.setText(f"{self.twilight_slider.value()}°")
+        self.settings["night_darkness"] = self.night_darkness_slider.value() / 100
+        self.night_darkness_value_label.setText(f"{self.night_darkness_slider.value()}%")
+        self.settings["temp_units"] = self.temp_units_combo.currentData() or "C"
         settings_module.save_settings(self.settings)
         self._restart_timer()
         self._schedule_preview_update()
@@ -516,7 +578,12 @@ class MainWindow(QMainWindow):
     def _update_busy_indicator(self) -> None:
         busy = (self._worker is not None and self._worker.isRunning()) or \
                (self._preview_worker is not None and self._preview_worker.isRunning())
-        self.progress.setVisible(busy)
+        if busy:
+            self._position_progress_bar()
+            self.progress.raise_()
+            self.progress.show()
+        else:
+            self.progress.hide()
 
     def trigger_update(self, *_qt_args) -> None:
         """Full-resolution render + apply as the desktop wallpaper. Used by
@@ -532,7 +599,6 @@ class MainWindow(QMainWindow):
         width, height = self._current_resolution()
         output_path = pick_next_wallpaper_path(WALLPAPER_BASE)
         self.status_label.setText("Rendering…")
-        self.progress.show()
         self._worker = RenderWorker(
             dict(self.settings), list(self.cities), str(output_path),
             width, height, apply_wallpaper=True,
@@ -542,6 +608,7 @@ class MainWindow(QMainWindow):
         self._worker.finished.connect(self._worker.deleteLater)
         self._worker.finished.connect(self._clear_worker_ref)
         self._worker.start()
+        self._update_busy_indicator()
 
     def trigger_preview_update(self) -> None:
         """Fast, low-resolution render for instant visual feedback while
@@ -551,7 +618,6 @@ class MainWindow(QMainWindow):
             # fire again shortly after it finishes if more changes came in.
             self._preview_debounce.start(PREVIEW_DEBOUNCE_MS)
             return
-        self.progress.show()
         self._preview_worker = RenderWorker(
             dict(self.settings), list(self.cities), str(PREVIEW_OUTPUT),
             PREVIEW_WIDTH, PREVIEW_HEIGHT, apply_wallpaper=False,
@@ -561,6 +627,7 @@ class MainWindow(QMainWindow):
         self._preview_worker.finished.connect(self._preview_worker.deleteLater)
         self._preview_worker.finished.connect(self._clear_preview_worker_ref)
         self._preview_worker.start()
+        self._update_busy_indicator()
 
     def _clear_worker_ref(self) -> None:
         self._worker = None
@@ -591,9 +658,21 @@ class MainWindow(QMainWindow):
             Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.preview_label.setPixmap(scaled)
 
+    def _position_progress_bar(self) -> None:
+        """Manually place the progress bar as an overlay along the bottom
+        of the preview - since it's not in a layout, it stays put and
+        toggling its visibility can't cause the surrounding layout to
+        reflow."""
+        w = self.preview_container.width()
+        h = self.preview_container.height()
+        pad = 8
+        bar_h = self.progress.height()
+        self.progress.setGeometry(pad, h - bar_h - pad, w - pad * 2, bar_h)
+
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._rescale_preview()
+        self._position_progress_bar()
 
     def _on_render_done(self, output_path: str) -> None:
         from datetime import datetime

@@ -101,15 +101,44 @@ def _day_night_mask(width: int, height: int, sub_lat: float, sub_lon: float,
 
 def _composite_day_night(day_img: Image.Image, night_img: Image.Image,
                           sub_lat: float, sub_lon: float,
-                          twilight_width_deg: float) -> Image.Image:
+                          twilight_width_deg: float,
+                          night_darkness: float = 0.85) -> Image.Image:
     w, h = day_img.size
     mask = _day_night_mask(w, h, sub_lat, sub_lon, twilight_width_deg)[:, :, None]
 
     day_arr = np.asarray(day_img, dtype=np.float32)
     night_arr = np.asarray(night_img, dtype=np.float32)
 
-    dim_day = day_arr * 0.12
-    night_layer = np.maximum(night_arr, dim_day)
+    # Night side rendering:
+    # - Bright city lights (from the Black Marble night map) should stay
+    #   vivid so they're the visual focus of the dark side.
+    # - Unlit land/ocean should look genuinely dark. The catch is that the
+    #   Black Marble source itself has heavily blue-tinted oceans (mean
+    #   B channel ~44 vs R ~7), so simply blending it against the day map
+    #   ends up looking "just tinted blue at night" - the user's actual
+    #   complaint - even though we're using the correct night map.
+    # - `night_darkness` (0..1) both suppresses the day-map fallback AND
+    #   scales down the dim parts of the night map itself, while
+    #   preserving bright pixels (city lights) untouched. This gives the
+    #   user a slider that goes from the old washed-out look to a proper
+    #   deep-black night with just lights showing.
+    dim_factor = max(0.0, 0.12 * (1.0 - night_darkness))
+    dim_day = day_arr * dim_factor
+
+    # Nonlinear night-map darkening: preserve bright pixels (max channel
+    # value close to 255) so city lights don't dim; aggressively darken
+    # mid-tones (the blue oceans) proportional to the slider. This is a
+    # per-pixel brightness weight in [0, 1] where 1 = "as bright as it
+    # gets, don't touch" and lower values scale the whole pixel down.
+    max_chan = night_arr.max(axis=2, keepdims=True) / 255.0
+    # brightness_weight rises fast toward 1 as pixels get bright, so
+    # city-light pixels (max_chan ~1) keep almost their full value while
+    # dim pixels (max_chan < 0.4, i.e. most ocean) get scaled way down.
+    brightness_weight = max_chan ** 0.6
+    dark_scale = 1.0 - night_darkness * (1.0 - brightness_weight)
+    darkened_night = night_arr * dark_scale
+
+    night_layer = np.maximum(darkened_night, dim_day)
 
     out = day_arr * mask + night_layer * (1 - mask)
     return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8), mode="RGB")
@@ -149,12 +178,109 @@ def _load_font(size: int) -> ImageFont.FreeTypeFont:
     return ImageFont.load_default()
 
 
+def _build_label_lines(city: dict, now_utc: datetime,
+                        weather_reading, temp_units: str) -> list[str]:
+    """Compose the multi-line label text for a single city, respecting
+    per-city display flags (show_time / show_weather / show_notes / show_name)
+    with sensible defaults for older configs missing those fields."""
+    lines: list[str] = []
+
+    if city.get("show_name", True):
+        lines.append(city.get("name", "Unnamed"))
+
+    if city.get("show_time", True):
+        try:
+            local_time = now_utc.astimezone(ZoneInfo(city["tz"])).strftime("%H:%M")
+        except Exception:
+            local_time = "--:--"
+        # If the name is also being shown and time is short enough, keep
+        # them on the same line so simple markers stay compact.
+        if lines and len(lines[-1]) + len(local_time) + 2 < 22:
+            lines[-1] = f"{lines[-1]}  {local_time}"
+        else:
+            lines.append(local_time)
+
+    if city.get("show_weather", False) and weather_reading is not None:
+        w_line = f"{weather_reading.emoji}  {weather_reading.temp_display(temp_units)}".strip()
+        if weather_reading.label and weather_reading.label != "--":
+            w_line = f"{w_line}  {weather_reading.label}"
+        lines.append(w_line)
+
+    if city.get("show_notes", False):
+        note = (city.get("notes") or "").strip()
+        if note:
+            # Wrap manually at ~26 chars so overlong notes don't blow out
+            # the marker box width; a hard cap on total note lines keeps
+            # verbose notes from dominating the map.
+            words = note.split()
+            wrapped: list[str] = []
+            current = ""
+            for word in words:
+                trial = f"{current} {word}".strip()
+                if len(trial) > 26 and current:
+                    wrapped.append(current)
+                    current = word
+                else:
+                    current = trial
+            if current:
+                wrapped.append(current)
+            lines.extend(wrapped[:3])
+
+    if not lines:
+        # Never render a completely empty label - at minimum, the name.
+        lines.append(city.get("name", "Unnamed"))
+
+    return lines
+
+
+def _draw_marker_shape(draw: ImageDraw.ImageDraw, x: int, y: int, r: int,
+                        color: tuple, style: str) -> None:
+    outline = (20, 20, 20, 255)
+    fill = (*color, 255)
+    if style == "square":
+        draw.rectangle([x - r, y - r, x + r, y + r], fill=fill, outline=outline, width=2)
+    elif style == "diamond":
+        draw.polygon([(x, y - r), (x + r, y), (x, y + r), (x - r, y)],
+                     fill=fill, outline=outline)
+    elif style == "star":
+        import math as _math
+        points = []
+        for i in range(10):
+            angle = -_math.pi / 2 + i * _math.pi / 5
+            rr = r if i % 2 == 0 else r / 2.4
+            points.append((x + rr * _math.cos(angle), y + rr * _math.sin(angle)))
+        draw.polygon(points, fill=fill, outline=outline)
+    elif style == "ring":
+        draw.ellipse([x - r, y - r, x + r, y + r],
+                     fill=None, outline=(*color, 255), width=max(2, r // 2))
+    else:  # "dot" (default) - filled circle
+        draw.ellipse([x - r, y - r, x + r, y + r], fill=fill, outline=outline, width=2)
+
+
 def _draw_city_markers(img: Image.Image, cities: list[dict], now_utc: datetime,
-                        center_lon: float) -> Image.Image:
+                        center_lon: float, temp_units: str = "C",
+                        weather_by_city: dict | None = None) -> Image.Image:
+    """Draw a labeled marker for each city.
+
+    Per-city fields honored (all optional):
+        name, lat, lon, tz, color                    - required basics
+        marker_style       - "dot" (default) | "square" | "diamond" | "star" | "ring"
+        marker_size        - float multiplier, default 1.0
+        label_side         - "right" (default) | "left" | "top" | "bottom" | "auto"
+        label_offset_x/_y  - additional pixels to nudge the label
+        show_name          - default True
+        show_time          - default True
+        show_weather       - default False
+        show_notes         - default False
+        notes              - free text
+        text_color         - [R, G, B] override, default white
+        background_alpha   - 0-255, default 165 (0 = fully transparent label bg)
+        label_scale        - float multiplier for label font size, default 1.0
+    """
+    weather_by_city = weather_by_city or {}
     draw = ImageDraw.Draw(img, "RGBA")
     w, h = img.size
-    font_size = max(11, w // 220)
-    font = _load_font(font_size)
+    base_font_size = max(11, w // 220)
     placed_boxes: list[tuple[int, int, int, int]] = []
 
     def _overlaps(box: tuple[int, int, int, int]) -> bool:
@@ -164,55 +290,94 @@ def _draw_city_markers(img: Image.Image, cities: list[dict], now_utc: datetime,
                 return True
         return False
 
-    for city in cities:
+    for i, city in enumerate(cities):
         lon, lat = city["lon"], city["lat"]
         x, y = _lonlat_to_xy(lon, lat, w, h, center_lon)
 
-        try:
-            local_time = now_utc.astimezone(ZoneInfo(city["tz"])).strftime("%H:%M")
-        except Exception:
-            local_time = "--:--"
-
         color = tuple(city.get("color", (255, 210, 60)))
-        marker_r = max(3, font_size // 3)
+        marker_style = city.get("marker_style", "dot")
+        size_mult = float(city.get("marker_size", 1.0))
+        marker_r = max(3, int((base_font_size // 3) * size_mult))
+        _draw_marker_shape(draw, x, y, marker_r, color, marker_style)
 
-        draw.ellipse(
-            [x - marker_r, y - marker_r, x + marker_r, y + marker_r],
-            fill=(*color, 255), outline=(20, 20, 20, 255), width=2,
-        )
+        weather_reading = weather_by_city.get(i)
+        lines = _build_label_lines(city, now_utc, weather_reading, temp_units)
 
-        label = f"{city['name']}  {local_time}"
-        text_bbox = draw.textbbox((0, 0), label, font=font)
-        tw, th = text_bbox[2] - text_bbox[0], text_bbox[3] - text_bbox[1]
+        # Per-city font scaling for emphasis on important cities.
+        font_size = max(9, int(base_font_size * float(city.get("label_scale", 1.0))))
+        font = _load_font(font_size)
+
+        # Measure the label as a block of stacked lines.
+        line_metrics = [draw.textbbox((0, 0), line, font=font) for line in lines]
+        line_widths = [bbox[2] - bbox[0] for bbox in line_metrics]
+        line_heights = [bbox[3] - bbox[1] for bbox in line_metrics]
+        line_ybase = [bbox[1] for bbox in line_metrics]
+        line_spacing = 3
+        text_w = max(line_widths) if line_widths else 0
+        text_h = sum(line_heights) + line_spacing * max(0, len(lines) - 1)
+
         pad_x, pad_y = 8, 5
-        box_h = th + pad_y * 2
+        box_w = text_w + pad_x * 2
+        box_h = text_h + pad_y * 2
 
-        label_x = x + marker_r + 8
-        if label_x + tw + pad_x * 2 > w:
-            label_x = x - marker_r - 8 - tw - pad_x * 2
-        base_y = y - th // 2 - pad_y
+        # Preferred anchor side. "auto" picks whichever side has more
+        # horizontal room, matching the original behavior; the explicit
+        # values let the user override that per city.
+        side = city.get("label_side", "right")
+        if side == "auto":
+            side = "right" if x + marker_r + 8 + box_w <= w else "left"
 
-        # If this label would sit on top of one already drawn (clustered
-        # cities like London/Paris/Amsterdam), nudge it up/down in steps
-        # until it finds clear space - far more readable than a pile-up.
+        offset_x = int(city.get("label_offset_x", 0))
+        offset_y = int(city.get("label_offset_y", 0))
+
+        gap = 8
+        if side == "left":
+            label_x = x - marker_r - gap - box_w + offset_x
+            base_y = y - box_h // 2 + offset_y
+        elif side == "top":
+            label_x = x - box_w // 2 + offset_x
+            base_y = y - marker_r - gap - box_h + offset_y
+        elif side == "bottom":
+            label_x = x - box_w // 2 + offset_x
+            base_y = y + marker_r + gap + offset_y
+        else:  # "right"
+            label_x = x + marker_r + gap + offset_x
+            base_y = y - box_h // 2 + offset_y
+
+        # Nudge vertically in steps if the preferred slot collides with
+        # an already-placed label (up/down alternation, up to 6 steps).
         label_y = base_y
-        for offset_steps in range(0, 6):
+        step_h = box_h + 3
+        placed = False
+        for offset_steps in range(0, 7):
             for direction in (1, -1) if offset_steps else (1,):
-                candidate_y = base_y + direction * offset_steps * (box_h + 3)
+                candidate_y = base_y + direction * offset_steps * step_h
                 candidate = (label_x, candidate_y,
-                             label_x + tw + pad_x * 2, candidate_y + box_h)
-                if not _overlaps(candidate) and 0 <= candidate_y and candidate[3] <= h:
+                             label_x + box_w, candidate_y + box_h)
+                if (not _overlaps(candidate)
+                        and candidate[0] >= 0 and candidate[2] <= w
+                        and candidate[1] >= 0 and candidate[3] <= h):
                     label_y = candidate_y
+                    placed = True
                     break
-            else:
-                continue
-            break
+            if placed:
+                break
+        # If we ran out of slots, just place it at the base position.
 
-        box = [label_x, label_y, label_x + tw + pad_x * 2, label_y + box_h]
-        placed_boxes.append(tuple(box))
-        draw.rounded_rectangle(box, radius=6, fill=(15, 15, 20, 165))
-        draw.text((label_x + pad_x, label_y + pad_y - text_bbox[1]), label,
-                   font=font, fill=(255, 255, 255, 255))
+        box = (label_x, label_y, label_x + box_w, label_y + box_h)
+        placed_boxes.append(box)
+
+        bg_alpha = int(city.get("background_alpha", 165))
+        if bg_alpha > 0:
+            draw.rounded_rectangle(list(box), radius=6, fill=(15, 15, 20, bg_alpha))
+
+        text_color = tuple(city.get("text_color", (255, 255, 255)))
+        # Draw lines top-down starting from padding.
+        y_cursor = label_y + pad_y
+        for idx, line in enumerate(lines):
+            draw.text((label_x + pad_x, y_cursor - line_ybase[idx]),
+                       line, font=font, fill=(*text_color, 255))
+            y_cursor += line_heights[idx] + line_spacing
 
     return img
 
@@ -221,8 +386,11 @@ def render(output_path: str | Path, width: int, height: int,
            cities: list[dict], when: datetime | None = None,
            map_id: str = "blue_marble_july", center_lon: float = 0.0,
            twilight_width_deg: float = 7.0,
+           night_darkness: float = 0.85,
            cloud_layer: Image.Image | None = None,
-           cloud_opacity: float = 0.35) -> None:
+           cloud_opacity: float = 0.35,
+           temp_units: str = "C",
+           weather_by_city: dict | None = None) -> None:
     """Render one wallpaper frame and save it to `output_path`."""
     when = when or datetime.now().astimezone()
     sub_lat, sub_lon = subsolar_point(when)
@@ -240,14 +408,16 @@ def render(output_path: str | Path, width: int, height: int,
         night_img = night_img.resize((width, height), Image.LANCZOS)
 
     composite = _composite_day_night(day_img, night_img, sub_lat, sub_lon,
-                                      twilight_width_deg)
+                                      twilight_width_deg, night_darkness)
     composite = _roll_longitude(composite, center_lon)
     composite = composite.filter(ImageFilter.UnsharpMask(radius=1.5, percent=60, threshold=2))
 
     if cloud_layer is not None:
         composite = _apply_clouds(composite, cloud_layer, center_lon, cloud_opacity)
 
-    composite = _draw_city_markers(composite, cities, when.astimezone(), center_lon)
+    composite = _draw_city_markers(composite, cities, when.astimezone(),
+                                    center_lon, temp_units=temp_units,
+                                    weather_by_city=weather_by_city)
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)

@@ -16,12 +16,14 @@ DEFAULTS = {
     "map_set": "blue_marble_july",
     "center_lon": 0.0,
     "twilight_width_deg": 7.0,
+    "night_darkness": 0.85,
     "interval_seconds": 300,
     "resolution": "auto",  # "auto" or [width, height]
     "autostart": False,
     "live_clouds": False,
     "cloud_opacity": 0.35,
     "paused": False,
+    "temp_units": "C",  # "C" or "F"
 }
 
 

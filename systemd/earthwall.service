@@ -1,5 +1,5 @@
 [Unit]
-Description=Earthwall live earth wallpaper daemon
+Description=EarthWall live earth wallpaper daemon
 After=graphical-session.target
 
 [Service]

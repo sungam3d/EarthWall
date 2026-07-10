@@ -26,7 +26,7 @@ def main() -> None:
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
-    app.setApplicationName("Earthwall")
+    app.setApplicationName("EarthWall")
 
     icon = QIcon(str(ICON_PATH)) if ICON_PATH.exists() else app.style().standardIcon(
         app.style().StandardPixmap.SP_ComputerIcon
@@ -36,7 +36,7 @@ def main() -> None:
     window.setWindowIcon(icon)
 
     tray = QSystemTrayIcon(icon)
-    tray.setToolTip("Earthwall - live Earth wallpaper")
+    tray.setToolTip("EarthWall - live Earth wallpaper")
 
     menu = QMenu()
     open_action = menu.addAction("Open Settings")
@@ -56,7 +56,7 @@ def main() -> None:
     window.pause_btn.toggled.connect(pause_action.setChecked)
 
     menu.addSeparator()
-    quit_action = menu.addAction("Quit Earthwall")
+    quit_action = menu.addAction("Quit EarthWall")
     quit_action.triggered.connect(app.quit)
 
     tray.setContextMenu(menu)

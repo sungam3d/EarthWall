@@ -1,4 +1,4 @@
-# earthwall
+# EarthWall
 
 A live, real-time Earth wallpaper for Linux: flat equirectangular map,
 astronomically accurate day/night terminator, night-side city lights,
@@ -60,8 +60,8 @@ pip install -r requirements.txt
 
 (or, equivalently: `source venv/bin/activate && python -m earthwall.gui`)
 
-The first launch also adds Earthwall to your applications menu, so after
-that first run you can just search for "Earthwall" in your app launcher
+The first launch also adds EarthWall to your applications menu, so after
+that first run you can just search for "EarthWall" in your app launcher
 like any other program - no terminal needed.
 
 A tray icon appears (a little cropped globe). The settings window opens
