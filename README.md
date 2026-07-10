@@ -20,12 +20,15 @@ NASA Blue Marble / Black Marble imagery.
 ### Application interface
 
 **General tab**
+
 ![General tab](assets/screenshots/SS-General.jpg)
 
 **Map & Views tab**
+
 ![Map & Views tab](assets/screenshots/SS-Map-Views.jpg)
 
 **Cities tab**
+
 ![Cities tab](assets/screenshots/SS-Cities.jpg)
 
 ## What's in the GUI
