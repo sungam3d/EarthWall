@@ -120,14 +120,26 @@ class MainWindow(QMainWindow):
         container_layout = QVBoxLayout(self.preview_container)
         container_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.preview_label = QLabel("No preview yet - rendering…", self.preview_container)
+        self.preview_label = QLabel(self.preview_container)
         self.preview_label.setAlignment(Qt.AlignCenter)
-        self.preview_label.setStyleSheet("background:#111; color:#888; border-radius:6px;")
+        self.preview_label.setStyleSheet(
+            "background:#111; color:#bbb; border-radius:6px;"
+            " font-size: 13px; padding: 24px;")
+        self.preview_label.setWordWrap(True)
         self.preview_label.setScaledContents(False)
         self.preview_label.setMinimumSize(1, 1)  # allow shrinking; parent controls actual size
         self.preview_label.setSizePolicy(
             QSizePolicy.Ignored, QSizePolicy.Ignored,
         )
+        # First-load spinner: an animated dot cycle + a note explaining why
+        # the first render is slow (fetching the 4MB cloud PNG, resampling
+        # ~5400x2700 source maps). Once a pixmap lands the timer stops.
+        self._spinner_dots = 0
+        self._spinner_timer = QTimer(self)
+        self._spinner_timer.setInterval(400)
+        self._spinner_timer.timeout.connect(self._tick_spinner)
+        self._tick_spinner()  # paint initial message
+        self._spinner_timer.start()
         container_layout.addWidget(self.preview_label)
 
         # Parented to the container (not added to a layout) so we can
@@ -760,7 +772,27 @@ class MainWindow(QMainWindow):
         target_h = min(max_h, int(available_w * aspect))
         self.preview_container.setFixedHeight(max(120, target_h))
 
+    def _tick_spinner(self) -> None:
+        """Animate the first-load placeholder. Runs until the first preview
+        pixmap is set, then stops for good - we only ever want this seen
+        on the initial slow render."""
+        self._spinner_dots = (self._spinner_dots + 1) % 4
+        dots = "." * self._spinner_dots + " " * (3 - self._spinner_dots)
+        self.preview_label.setText(
+            f"Preparing your first Earth view {dots}\n\n"
+            "The first render is the slow one:\n"
+            " • downloading the live cloud map (~4 MB, cached for 3 hours)\n"
+            " • resampling the high-resolution source map to your screen\n"
+            " • fetching weather for any cities you've added\n\n"
+            "After this it stays cached and updates are near-instant."
+        )
+
+    def _stop_spinner(self) -> None:
+        if self._spinner_timer.isActive():
+            self._spinner_timer.stop()
+
     def _show_preview_pixmap(self, output_path: str) -> None:
+        self._stop_spinner()
         self._last_preview_pixmap = QPixmap(output_path)
         self._rescale_preview()
 

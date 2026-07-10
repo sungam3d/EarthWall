@@ -24,6 +24,14 @@ DEFAULTS = {
     "cloud_opacity": 0.35,
     "cloud_density": 1.0,   # 1.0 = raw satellite coverage; lower thins the field
     "night_view": True,     # False = full daylight map, no terminator/night side
+    # --- Multi-monitor (Phase 2) ---
+    # "mirror"      = same map image on every monitor (default, back-compat)
+    # "span"        = one wide image stretched across all monitors as one
+    #                 virtual desktop; void areas (diagonal layouts, gaps)
+    #                 painted with the primary monitor's void_fill.
+    # "independent" = each monitor gets its own map view / zoom / pan.
+    "monitors_mode": "mirror",
+    "monitor_configs": {},  # keyed by monitor index (str) - see monitors.py
     "paused": False,
     "temp_units": "C",  # "C" or "F"
 }
