@@ -27,17 +27,23 @@
 - [x] **2.2 Settings schema** — `monitors_mode`: "mirror" | "span" | "independent";
       per-monitor map config for independent mode. **Done: defaults in settings.py,
       helpers in monitors.py (monitor_config_for / set_monitor_config).**
-- [ ] **2.3 Preview UI rework** — screen-area preview showing each monitor as an
+- [x] **2.3 Preview UI rework** — screen-area preview showing each monitor as an
       outlined rect inside the virtual desktop grid; two previews (or combined
       grid view) when 2 monitors detected, each at its own aspect.
-      **NEEDS EarthView-01..04.jpg from user before starting.**
-- [ ] **2.4 Map placement controls** — zoom slider, pan up/down as well as
+      **Done in gui_display_widgets.py (ScreenAreaPreview). Handles diagonal
+      layouts correctly (verified against EarthView-04 numbers).**
+- [~] **2.4 Map placement controls** — zoom slider, pan up/down as well as
       left/right (map offset x/y), draggable red focal-point dot on the preview
       (EarthView style). Settings: `zoom`, `offset_x`, `offset_y` (per monitor
-      in independent mode). Settings keys already reserved in DEFAULT_MONITOR_CONFIG.
-- [ ] **2.5 Void fill** — when zoom/pan leaves screen area uncovered: custom
-      solid colour picker or background image chooser. Settings keys already
-      reserved (`void_fill_color`, `void_fill_image`).
+      in independent mode). **Partial: draggable red-dot focal picker
+      (MapFocalPointPreview) done and wired to center_lon/center_lat; zoom
+      slider done and stored in monitor_configs["0"]["zoom"]. Still to do:
+      per-monitor placement in independent mode, position spinboxes like
+      EarthView, view-list (Add View/Remove).**
+- [~] **2.5 Void fill** — when zoom/pan leaves screen area uncovered: custom
+      solid colour picker or background image chooser. **Partial: colour picker
+      wired to monitor_configs["0"]["void_fill_color"]. Still to do: image file
+      chooser, per-monitor void fill in independent mode.**
 - [ ] **2.6 Renderer changes** — render.py: compose per-monitor or spanned
       output; wallpaper.py: apply spanned image (GNOME "spanned" option) or
       per-monitor wallpapers depending on DE support.
@@ -53,3 +59,4 @@
 ## Session log
 - Session 1 (2026-07-10): Phase 1 COMPLETE (1.1-1.4 implemented + smoke-tested headless). Version bumped to 1.0.07. Next session: start Phase 2.1; ask user to re-attach EarthView-01..04.jpg screenshots.
 - Session 2 (2026-07-10): Added first-load spinner with explanatory text (animated dots + "why this is slow" note; stops on first pixmap). Phase 2.1 + 2.2 complete: monitors.py module with Monitor / MonitorLayout dataclasses, detect_layout(), virtual-desktop bounding box (preserves negative offsets for diagonal setups), per-monitor config helpers. Settings schema extended with monitors_mode + monitor_configs. Version 1.0.08. Phase 2.3 blocked on user re-attaching EarthView-01..04.jpg screenshots.
+- Session 3 (2026-07-11): Got EarthView screenshots. New "Displays" tab in main window. New gui_display_widgets.py with ScreenAreaPreview (renders virtual desktop + monitors + red-outlined map area, verified against diagonal EarthView-04 numbers) and MapFocalPointPreview (draggable red dot updating center_lon/center_lat live). Mode selector (mirror/span/independent), zoom slider, void-fill colour picker all wired to settings. Monitor detection deferred to showEvent (needs live QApplication). Version 1.0.09. NEXT: 2.6 renderer — teach render.py to compose per-monitor / spanned output, honour zoom + focal, paint void fill; teach wallpaper.py to apply spanned or per-monitor. Also 2.4/2.5 tail: position spinboxes, view list, per-monitor independent editing, void-fill image chooser.

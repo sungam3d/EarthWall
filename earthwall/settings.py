@@ -15,6 +15,7 @@ CITIES_PATH = CONFIG_DIR / "cities.json"
 DEFAULTS = {
     "map_set": "blue_marble_july",
     "center_lon": 0.0,
+    "center_lat": 0.0,   # Phase 2 focal point Y - honoured once 2.6 lands
     "twilight_width_deg": 7.0,
     "night_darkness": 0.85,
     "interval_seconds": 300,

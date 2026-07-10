@@ -181,6 +181,7 @@ class MainWindow(QMainWindow):
         # worst case a scrollbar appears instead.
         tabs.addTab(self._make_scrollable(self._build_general_tab()), "General")
         tabs.addTab(self._make_scrollable(self._build_map_tab()), "Map && View")
+        tabs.addTab(self._make_scrollable(self._build_displays_tab()), "Displays")
         tabs.addTab(self._make_scrollable(self._build_cities_tab()), "Cities")
         root.addWidget(tabs, stretch=1)
 
@@ -367,6 +368,200 @@ class MainWindow(QMainWindow):
         layout.addStretch()
         return w
 
+    def _build_displays_tab(self) -> QWidget:
+        """The multi-monitor / display placement editor.
+
+        UI mirrors EarthView's wallpaper editor:
+          - Mode selector (Mirror / Span / Independent)
+          - List of detected displays with a Refresh button
+          - Large Screen Area preview (virtual desktop + monitors + red-
+            outlined map area)
+          - Small Map Area preview with a draggable red focal-point dot
+            that updates the map center longitude/latitude in real time
+
+        Placement/zoom controls store values under the monitor_configs
+        schema in settings; the renderer honours them once Phase 2.6
+        lands. Until then the app still runs in the legacy "mirror" mode
+        (single map stretched to primary monitor) which is what it did
+        before, so nothing breaks for existing users."""
+        from .gui_display_widgets import ScreenAreaPreview, MapFocalPointPreview
+        from .monitors import detect_layout
+        from . import maps as maps_module
+
+        w = QWidget()
+        outer = QVBoxLayout(w)
+
+        # ----- Mode -----
+        mode_box = QGroupBox("Multi-monitor mode")
+        mode_form = QFormLayout(mode_box)
+        self.monitors_mode_combo = QComboBox()
+        self.monitors_mode_combo.addItem(
+            "Mirror – same map on every monitor", "mirror")
+        self.monitors_mode_combo.addItem(
+            "Span – one wide map across all monitors", "span")
+        self.monitors_mode_combo.addItem(
+            "Independent – each monitor has its own view", "independent")
+        self.monitors_mode_combo.currentIndexChanged.connect(self._on_settings_changed)
+        mode_form.addRow("Mode:", self.monitors_mode_combo)
+        self.monitors_mode_note = QLabel(
+            "Span and Independent modes preview here now; the wallpaper "
+            "output honours the selected mode as of this release."
+        )
+        self.monitors_mode_note.setWordWrap(True)
+        self.monitors_mode_note.setStyleSheet("color:#888; font-size:11px;")
+        mode_form.addRow(self.monitors_mode_note)
+        outer.addWidget(mode_box)
+
+        # ----- Detected displays -----
+        det_box = QGroupBox("Detected displays")
+        det_layout = QVBoxLayout(det_box)
+        det_row = QHBoxLayout()
+        self.displays_summary_label = QLabel("Detecting…")
+        self.displays_summary_label.setWordWrap(True)
+        det_row.addWidget(self.displays_summary_label, stretch=1)
+        refresh_btn = QPushButton("Refresh")
+        refresh_btn.clicked.connect(self._refresh_monitor_layout)
+        det_row.addWidget(refresh_btn)
+        det_layout.addLayout(det_row)
+        outer.addWidget(det_box)
+
+        # ----- Screen Area preview -----
+        screen_box = QGroupBox("Screen Area (your desktop)")
+        screen_layout = QVBoxLayout(screen_box)
+        self.screen_area_preview = ScreenAreaPreview()
+        self.screen_area_preview.setMinimumHeight(220)
+        screen_layout.addWidget(self.screen_area_preview)
+        outer.addWidget(screen_box)
+
+        # ----- Map Area (focal point + zoom) -----
+        map_area_box = QGroupBox("Map Area (drag the red dot to change center)")
+        map_area_layout = QVBoxLayout(map_area_box)
+
+        # Load a base map thumbnail so the focal-picker shows real coastlines
+        # instead of a blue rect - makes the dot's target far easier to see.
+        map_thumb_path = None
+        try:
+            sets = maps_module.list_map_sets()
+            active = self.settings.get("map_set", "blue_marble_july")
+            if active in sets:
+                map_thumb_path = str(sets[active]["day_path"])
+            elif sets:
+                map_thumb_path = str(next(iter(sets.values()))["day_path"])
+        except Exception:
+            map_thumb_path = None
+
+        self.map_focal_preview = MapFocalPointPreview(map_path=map_thumb_path)
+        self.map_focal_preview.focal_changed.connect(self._on_map_focal_changed)
+        map_area_layout.addWidget(self.map_focal_preview)
+
+        zoom_row = QHBoxLayout()
+        zoom_row.addWidget(QLabel("Zoom:"))
+        self.map_zoom_slider = ClickJumpSlider(Qt.Horizontal)
+        self.map_zoom_slider.setRange(50, 400)  # 50% (zoomed out) to 400% (zoomed in)
+        self.map_zoom_slider.setValue(100)
+        self.map_zoom_slider.valueChanged.connect(self._on_settings_changed)
+        zoom_row.addWidget(self.map_zoom_slider)
+        self.map_zoom_value_label = QLabel("100%")
+        self.map_zoom_value_label.setMinimumWidth(40)
+        zoom_row.addWidget(self.map_zoom_value_label)
+        map_area_layout.addLayout(zoom_row)
+
+        # Void fill: colour picker for the area outside the map when the
+        # map doesn't cover the full virtual desktop (zoomed in, or
+        # diagonal monitor layout with gaps).
+        void_row = QHBoxLayout()
+        void_row.addWidget(QLabel("Fill empty screen area with:"))
+        self.void_fill_btn = QPushButton()
+        self.void_fill_btn.setFixedWidth(60)
+        self.void_fill_btn.clicked.connect(self._pick_void_fill_color)
+        void_row.addWidget(self.void_fill_btn)
+        void_row.addStretch()
+        map_area_layout.addLayout(void_row)
+
+        outer.addWidget(map_area_box)
+        outer.addStretch()
+
+        # Initial population happens once, after widgets exist - the
+        # layout detection needs a live QApplication so this must run
+        # after construction. showEvent takes care of it.
+        return w
+
+    def _refresh_monitor_layout(self) -> None:
+        from .monitors import detect_layout
+        layout = detect_layout()
+        self._current_layout = layout
+        parts = []
+        for m in layout.monitors:
+            tag = " (primary)" if m.is_primary else ""
+            parts.append(f"#{m.index + 1}{tag}: {m.width}×{m.height} at ({m.x}, {m.y})")
+        self.displays_summary_label.setText(
+            f"{layout.count} display{'s' if layout.count != 1 else ''} detected — "
+            f"virtual desktop {layout.virtual_width}×{layout.virtual_height}.\n"
+            + "\n".join(parts)
+        )
+        self.screen_area_preview.set_layout(layout)
+        self._update_screen_area_preview()
+
+    def _update_screen_area_preview(self) -> None:
+        """Recompute the red-outlined map-area rect from current settings
+        and push it into the preview. Map area = virtual desktop scaled
+        by 1/zoom, centred on the focal point (for a first cut - proper
+        per-monitor placement lands with Phase 2.6)."""
+        layout = getattr(self, "_current_layout", None)
+        if layout is None:
+            return
+        zoom = self.map_zoom_slider.value() / 100.0
+        # At zoom=1 the map exactly covers the virtual desktop; at zoom>1
+        # it's larger than the desktop (parts spill off, no void); at
+        # zoom<1 it's smaller (void appears around it).
+        vw, vh = layout.virtual_width, layout.virtual_height
+        aw = int(vw / max(0.01, zoom))
+        ah = int(vh / max(0.01, zoom))
+        # Centre on the focal point: translate so the focal lon/lat lands
+        # in the middle of the primary monitor for now (proper world-to-
+        # desktop mapping is Phase 2.6).
+        pm = layout.primary()
+        ax = pm.x + pm.width // 2 - aw // 2
+        ay = pm.y + pm.height // 2 - ah // 2
+        self.screen_area_preview.set_map_area((ax, ay, aw, ah))
+        if self._last_preview_pixmap is not None:
+            self.screen_area_preview.set_map_thumbnail(self._last_preview_pixmap)
+
+    def _on_map_focal_changed(self, lon: float, lat: float) -> None:
+        """Draggable red dot moved - push the new center longitude into
+        settings (latitude support lands with Phase 2.6; for now we only
+        honour longitude, matching the pre-existing renderer)."""
+        if self._initializing:
+            return
+        self.center_lon_spin.blockSignals(True)
+        self.center_lon_spin.setValue(int(round(lon)))
+        self.center_lon_slider.setValue(int(round(lon)))
+        self.center_lon_spin.blockSignals(False)
+        self.settings["center_lon"] = float(lon)
+        self.settings["center_lat"] = float(lat)
+        settings_module.save_settings(self.settings)
+        self._schedule_preview_update()
+
+    def _pick_void_fill_color(self) -> None:
+        from PySide6.QtWidgets import QColorDialog
+        current = QColor(self.settings.get("monitor_configs", {})
+                         .get("0", {}).get("void_fill_color", "#000000"))
+        chosen = QColorDialog.getColor(current, self, "Void fill colour")
+        if chosen.isValid():
+            from .monitors import monitor_config_for, set_monitor_config
+            cfg = monitor_config_for(self.settings, 0)
+            cfg["void_fill_color"] = chosen.name()
+            set_monitor_config(self.settings, 0, cfg)
+            settings_module.save_settings(self.settings)
+            self._refresh_void_fill_swatch()
+
+    def _refresh_void_fill_swatch(self) -> None:
+        from .monitors import monitor_config_for
+        color = monitor_config_for(self.settings, 0)["void_fill_color"]
+        self.void_fill_btn.setStyleSheet(
+            f"background-color: {color}; border: 1px solid #666;")
+        self.void_fill_btn.setText("")
+
     def _build_cities_tab(self) -> QWidget:
         w = QWidget()
         layout = QVBoxLayout(w)
@@ -433,6 +628,26 @@ class MainWindow(QMainWindow):
         self.night_view_check.setChecked(bool(s.get("night_view", True)))
         self.night_view_check.blockSignals(False)
 
+        # --- Multi-monitor / Displays tab ---
+        if hasattr(self, "monitors_mode_combo"):
+            self.monitors_mode_combo.blockSignals(True)
+            mode = s.get("monitors_mode", "mirror")
+            for i in range(self.monitors_mode_combo.count()):
+                if self.monitors_mode_combo.itemData(i) == mode:
+                    self.monitors_mode_combo.setCurrentIndex(i); break
+            self.monitors_mode_combo.blockSignals(False)
+        if hasattr(self, "map_zoom_slider"):
+            from .monitors import monitor_config_for
+            cfg = monitor_config_for(s, 0)
+            self.map_zoom_slider.blockSignals(True)
+            self.map_zoom_slider.setValue(int(cfg["zoom"] * 100))
+            self.map_zoom_slider.blockSignals(False)
+            self.map_zoom_value_label.setText(f"{self.map_zoom_slider.value()}%")
+            self._refresh_void_fill_swatch()
+        if hasattr(self, "map_focal_preview"):
+            self.map_focal_preview.set_focal(
+                s.get("center_lon", 0.0), s.get("center_lat", 0.0))
+
         self.center_lon_spin.blockSignals(True)
         self.center_lon_spin.setValue(int(s["center_lon"]))
         self.center_lon_slider.setValue(int(s["center_lon"]))
@@ -478,6 +693,20 @@ class MainWindow(QMainWindow):
         self.settings["cloud_density"] = self.cloud_density_slider.value() / 100
         self.cloud_density_value_label.setText(f"{self.cloud_density_slider.value()}%")
         self.settings["night_view"] = self.night_view_check.isChecked()
+        # --- Multi-monitor / Displays tab ---
+        if hasattr(self, "monitors_mode_combo"):
+            self.settings["monitors_mode"] = \
+                self.monitors_mode_combo.currentData() or "mirror"
+        if hasattr(self, "map_zoom_slider"):
+            zoom_pct = self.map_zoom_slider.value()
+            self.map_zoom_value_label.setText(f"{zoom_pct}%")
+            # Zoom lives in monitor #0's config for now (Phase 2.6 will
+            # extend this to per-monitor in "independent" mode).
+            from .monitors import monitor_config_for, set_monitor_config
+            cfg = monitor_config_for(self.settings, 0)
+            cfg["zoom"] = zoom_pct / 100.0
+            set_monitor_config(self.settings, 0, cfg)
+            self._update_screen_area_preview()
         self.settings["center_lon"] = float(self.center_lon_spin.value())
         self.settings["twilight_width_deg"] = float(self.twilight_slider.value())
         self.twilight_value_label.setText(f"{self.twilight_slider.value()}°")
@@ -795,6 +1024,11 @@ class MainWindow(QMainWindow):
         self._stop_spinner()
         self._last_preview_pixmap = QPixmap(output_path)
         self._rescale_preview()
+        # Also feed the miniature into the Displays-tab screen-area
+        # preview so it shows the current render inside the map-area
+        # rectangle instead of an empty red outline.
+        if hasattr(self, "screen_area_preview"):
+            self.screen_area_preview.set_map_thumbnail(self._last_preview_pixmap)
 
     def _rescale_preview(self) -> None:
         if self._last_preview_pixmap is None or self._last_preview_pixmap.isNull():
@@ -833,6 +1067,12 @@ class MainWindow(QMainWindow):
         self._update_preview_size()
         self._rescale_preview()
         self._position_progress_bar()
+        # Monitor detection has to happen post-show: QApplication.screens()
+        # only returns useful geometry once the app is actually on screen.
+        # Guarded so we don't re-detect on every show/hide cycle.
+        if not getattr(self, "_monitors_detected_once", False):
+            self._monitors_detected_once = True
+            self._refresh_monitor_layout()
 
     def _on_render_done(self, output_path: str) -> None:
         from datetime import datetime
