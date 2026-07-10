@@ -616,6 +616,100 @@ def _compose_multi_monitor(map_img: Image.Image, virtual_w: int, virtual_h: int,
     return canvas
 
 
+def _render_map_image(width: int, height: int, cities: list[dict],
+                       when: datetime, sub_lat: float, sub_lon: float,
+                       map_id: str, center_lon: float,
+                       twilight_width_deg: float, night_darkness: float,
+                       cloud_layer, cloud_opacity: float, cloud_density: float,
+                       night_view: bool, temp_units: str,
+                       weather_by_city: dict | None) -> Image.Image:
+    """Produce a single (width x height) map image with day/night,
+    clouds, and city markers all applied. Extracted from render() so the
+    independent multi-monitor branch can call it once per monitor with
+    per-monitor parameters."""
+    day_img, night_img = _load_maps(map_id)
+    # Downsample to target size BEFORE the per-pixel day/night blend -
+    # blend and unsharp then scale with the requested output size rather
+    # than the ~5400x2700 source resolution.
+    if day_img.size != (width, height):
+        day_img = day_img.resize((width, height), Image.LANCZOS)
+        night_img = night_img.resize((width, height), Image.LANCZOS)
+
+    if night_view:
+        composite = _composite_day_night(day_img, night_img, sub_lat, sub_lon,
+                                          twilight_width_deg, night_darkness)
+    else:
+        composite = day_img.convert("RGB")
+    composite = _roll_longitude(composite, center_lon)
+    composite = composite.filter(ImageFilter.UnsharpMask(radius=1.5, percent=60, threshold=2))
+
+    if cloud_layer is not None:
+        composite = _apply_clouds(composite, cloud_layer, center_lon,
+                                   cloud_opacity, cloud_density)
+
+    composite = _draw_city_markers(composite, cities, when.astimezone(),
+                                    center_lon, temp_units=temp_units,
+                                    weather_by_city=weather_by_city)
+    return composite
+
+
+def _render_monitor_view(monitor, monitor_config: dict, global_center_lon: float,
+                          global_center_lat: float, cities: list[dict],
+                          when: datetime, sub_lat: float, sub_lon: float,
+                          map_id: str, twilight_width_deg: float,
+                          night_darkness: float, cloud_layer,
+                          cloud_opacity: float, cloud_density: float,
+                          night_view: bool, temp_units: str,
+                          weather_by_city: dict | None) -> Image.Image:
+    """Render a single monitor's view in "independent" mode, sized to
+    that monitor's exact pixel dimensions.
+
+    Per-monitor settings (zoom, focal lon/lat, void fill) come from
+    `monitor_config`; anything missing falls back to the global setting,
+    so switching mirror → independent doesn't blank a monitor that has
+    no explicit config yet.
+
+    Zoom > 1: render bigger than the monitor and centre-crop (shows less
+    of the world, in more detail).
+    Zoom < 1: render smaller than the monitor and pad with the monitor's
+    own void fill (per-monitor colour/image applies here).
+    Zoom = 1: render at monitor size, no cropping or padding.
+    """
+    zoom = monitor_config.get("zoom", 1.0)
+    m_lon = monitor_config.get("center_lon", global_center_lon)
+    m_lat = monitor_config.get("center_lat", global_center_lat)
+    mw, mh = monitor.width, monitor.height
+    render_w = max(1, int(round(mw * zoom)))
+    render_h = max(1, int(round(mh * zoom)))
+
+    img = _render_map_image(render_w, render_h, cities, when, sub_lat, sub_lon,
+                             map_id, m_lon, twilight_width_deg, night_darkness,
+                             cloud_layer, cloud_opacity, cloud_density,
+                             night_view, temp_units, weather_by_city)
+
+    if zoom > 1.0:
+        # Centre-crop to monitor size; latitude focal shifts the crop
+        # window vertically so different rows of the world can be shown.
+        crop_x = (render_w - mw) // 2
+        crop_y = (render_h - mh) // 2 - int(round(m_lat / 90.0 * (render_h - mh) / 2))
+        crop_x = max(0, min(render_w - mw, crop_x))
+        crop_y = max(0, min(render_h - mh, crop_y))
+        img = img.crop((crop_x, crop_y, crop_x + mw, crop_y + mh))
+    elif zoom < 1.0:
+        # Pad to monitor size with the monitor's void fill so shrinking
+        # the map doesn't stretch it - matches what a user expects when
+        # setting a per-monitor zoom < 100% for a "small globe on wide
+        # empty desktop" look.
+        void = _load_void_fill(monitor_config.get("void_fill_color", "#000000"),
+                                 monitor_config.get("void_fill_image"),
+                                 (mw, mh))
+        paste_x = (mw - render_w) // 2
+        paste_y = (mh - render_h) // 2 + int(round(m_lat / 90.0 * (mh - render_h) / 2))
+        void.paste(img, (paste_x, paste_y))
+        img = void
+    return img
+
+
 def render(output_path: str | Path, width: int, height: int,
            cities: list[dict], when: datetime | None = None,
            map_id: str = "blue_marble_july", center_lon: float = 0.0,
@@ -639,81 +733,77 @@ def render(output_path: str | Path, width: int, height: int,
            map_pos_x: int = 0,
            map_pos_y: int = 0,
            void_fill_color: str = "#000000",
-           void_fill_image: str | None = None) -> None:
+           void_fill_image: str | None = None,
+           # Full per-monitor config dict (only read in independent mode).
+           # Keyed by monitor index as a string, matching monitors.py.
+           monitor_configs: dict | None = None) -> None:
     """Render one wallpaper frame and save it to `output_path`.
 
-    In "mirror" mode (default, back-compat) the map is rendered at
-    (width, height) exactly as before. In "span"/"independent" modes,
-    when `monitor_layout` is provided, the map is composed onto a
-    virtual-desktop-sized canvas honouring zoom, focal point, and void
-    fill. Independent mode currently uses the same composition as span;
-    per-monitor independent placement lands in a future revision.
+    Modes:
+      - "mirror" (default, back-compat): single image at (width, height).
+      - "span": one map spanning the whole virtual desktop, honouring
+        zoom / focal / void fill / explicit position.
+      - "independent": each monitor renders its own view using its own
+        per-monitor config (zoom, focal, void fill). Uncovered gaps
+        between monitors (diagonal layouts) use the global void fill.
     """
     when = when or datetime.now().astimezone()
     sub_lat, sub_lon = subsolar_point(when)
 
-    # Decide the actual render dimensions. Mirror mode keeps the classic
-    # single-image behaviour. Span mode renders the *map* at zoom-scaled
-    # size and later composes it onto a virtual-desktop-sized canvas.
-    use_multi = (monitors_mode in ("span", "independent")
-                 and monitor_layout is not None
-                 and monitor_layout.virtual_width > 0)
-    if use_multi:
+    has_layout = (monitor_layout is not None and monitor_layout.virtual_width > 0)
+    is_span = monitors_mode == "span" and has_layout
+    is_independent = monitors_mode == "independent" and has_layout
+
+    # ---- Independent mode: render each monitor separately ----
+    if is_independent:
+        virtual_w = monitor_layout.virtual_width
+        virtual_h = monitor_layout.virtual_height
+        # Base canvas with the *global* void fill for gaps between
+        # monitors (diagonal layouts). Individual monitors may override
+        # their own void fill via their monitor_config.
+        canvas = _load_void_fill(void_fill_color, void_fill_image,
+                                   (virtual_w, virtual_h))
+        cfgs = monitor_configs or {}
+        for m in monitor_layout.monitors:
+            cfg = cfgs.get(str(m.index), {})
+            mon_img = _render_monitor_view(
+                m, cfg, center_lon, center_lat, cities, when, sub_lat, sub_lon,
+                map_id, twilight_width_deg, night_darkness, cloud_layer,
+                cloud_opacity, cloud_density, night_view, temp_units,
+                weather_by_city,
+            )
+            lx, ly, _, _ = monitor_layout.local_rect(m)
+            canvas.paste(mon_img, (lx, ly))
+        composite = canvas
+
+    # ---- Span mode: one map across the whole virtual desktop ----
+    elif is_span:
         virtual_w = monitor_layout.virtual_width
         virtual_h = monitor_layout.virtual_height
         map_w = max(1, int(round(virtual_w * map_zoom)))
         map_h = max(1, int(round(virtual_h * map_zoom)))
-        # Explicit position (from spinboxes) wins if either coord is
-        # non-zero; otherwise auto-centre and shift by focal latitude.
-        # +lat looks up, so the map slides down.
         if map_pos_x != 0 or map_pos_y != 0:
             map_x = map_pos_x
             map_y = map_pos_y
         else:
             map_x = (virtual_w - map_w) // 2
             map_y = (virtual_h - map_h) // 2 + int(round(center_lat / 90.0 * map_h / 2))
-        render_w, render_h = map_w, map_h
-    else:
-        render_w, render_h = width, height
-
-    day_img, night_img = _load_maps(map_id)
-
-    # Downsample to the target size FIRST, before the per-pixel day/night
-    # blend - the blend math (and the unsharp mask afterwards) then scales
-    # with the requested output size instead of the ~5400x2700 source
-    # resolution every time. This is the difference between a "low-res
-    # preview" actually being fast versus doing full-resolution work and
-    # throwing most of it away at the final resize.
-    if day_img.size != (render_w, render_h):
-        day_img = day_img.resize((render_w, render_h), Image.LANCZOS)
-        night_img = night_img.resize((render_w, render_h), Image.LANCZOS)
-
-    if night_view:
-        composite = _composite_day_night(day_img, night_img, sub_lat, sub_lon,
-                                          twilight_width_deg, night_darkness)
-    else:
-        # Night view disabled: show the full daylight map everywhere.
-        composite = day_img.convert("RGB")
-    composite = _roll_longitude(composite, center_lon)
-    composite = composite.filter(ImageFilter.UnsharpMask(radius=1.5, percent=60, threshold=2))
-
-    if cloud_layer is not None:
-        composite = _apply_clouds(composite, cloud_layer, center_lon,
-                                   cloud_opacity, cloud_density)
-
-    composite = _draw_city_markers(composite, cities, when.astimezone(),
-                                    center_lon, temp_units=temp_units,
-                                    weather_by_city=weather_by_city)
-
-    # Multi-monitor composition: place the rendered map onto a virtual-
-    # desktop-sized canvas with void fill in any uncovered area. Mirror
-    # mode skips this entirely - the pre-existing single-image output is
-    # exactly what the OS's own "mirror" wallpaper mode expects.
-    if use_multi:
+        map_img = _render_map_image(
+            map_w, map_h, cities, when, sub_lat, sub_lon, map_id, center_lon,
+            twilight_width_deg, night_darkness, cloud_layer, cloud_opacity,
+            cloud_density, night_view, temp_units, weather_by_city,
+        )
         composite = _compose_multi_monitor(
-            composite, virtual_w, virtual_h,
-            map_w, map_h, map_x, map_y,
+            map_img, virtual_w, virtual_h, map_w, map_h, map_x, map_y,
             void_fill_color, void_fill_image,
+        )
+
+    # ---- Mirror mode (default): classic single-image render ----
+    else:
+        composite = _render_map_image(
+            width, height, cities, when, sub_lat, sub_lon, map_id, center_lon,
+            twilight_width_deg, night_darkness, cloud_layer, cloud_opacity,
+            cloud_density, night_view, temp_units, weather_by_city,
         )
 
     output_path = Path(output_path)

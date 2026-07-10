@@ -406,8 +406,9 @@ class MainWindow(QMainWindow):
         self.monitors_mode_note = QLabel(
             "Span composes one wide map across all monitors, filling any "
             "gaps (diagonal layouts, zoom < 100%) with the void colour "
-            "below. Independent currently renders like Span; per-monitor "
-            "independent views land in a later revision."
+            "below. Independent lets each monitor have its own zoom, "
+            "focal point, and void fill — pick which monitor to edit "
+            "from the selector that appears."
         )
         self.monitors_mode_note.setWordWrap(True)
         self.monitors_mode_note.setStyleSheet("color:#888; font-size:11px;")
@@ -426,6 +427,25 @@ class MainWindow(QMainWindow):
         det_row.addWidget(refresh_btn)
         det_layout.addLayout(det_row)
         outer.addWidget(det_box)
+
+        # Per-monitor editor selector - only meaningful in "independent"
+        # mode where each monitor can have its own view. In mirror/span
+        # the row hides itself (monitor 0's config represents the whole
+        # thing) so casual users aren't confronted with an irrelevant
+        # dropdown.
+        self.monitor_editor_row = QWidget()
+        editor_layout = QHBoxLayout(self.monitor_editor_row)
+        editor_layout.setContentsMargins(0, 0, 0, 0)
+        editor_layout.addWidget(QLabel("Editing monitor:"))
+        self.monitor_editor_combo = QComboBox()
+        self.monitor_editor_combo.currentIndexChanged.connect(
+            self._on_active_monitor_changed)
+        editor_layout.addWidget(self.monitor_editor_combo)
+        editor_layout.addWidget(QLabel(
+            " – each monitor keeps its own zoom, focal point, and void fill."))
+        editor_layout.addStretch()
+        self.monitor_editor_row.setVisible(False)
+        outer.addWidget(self.monitor_editor_row)
 
         # ----- Screen Area preview -----
         screen_box = QGroupBox("Screen Area (your desktop)")
@@ -545,6 +565,7 @@ class MainWindow(QMainWindow):
         )
         self.screen_area_preview.set_layout(layout)
         self._update_screen_area_preview()
+        self._rebuild_monitor_editor_combo()
 
     def _update_screen_area_preview(self) -> None:
         """Recompute the red-outlined map-area rect from current settings
@@ -572,30 +593,41 @@ class MainWindow(QMainWindow):
             self.screen_area_preview.set_map_thumbnail(self._last_preview_pixmap)
 
     def _on_map_focal_changed(self, lon: float, lat: float) -> None:
-        """Draggable red dot moved - push the new center longitude into
-        settings (latitude support lands with Phase 2.6; for now we only
-        honour longitude, matching the pre-existing renderer)."""
+        """Draggable red dot moved. In mirror/span the new focal updates
+        the global center_lon/center_lat (single map). In independent
+        mode it updates the currently-edited monitor's per-monitor
+        focal, leaving other monitors untouched."""
         if self._initializing:
             return
-        self.center_lon_spin.blockSignals(True)
-        self.center_lon_spin.setValue(int(round(lon)))
-        self.center_lon_slider.setValue(int(round(lon)))
-        self.center_lon_spin.blockSignals(False)
-        self.settings["center_lon"] = float(lon)
-        self.settings["center_lat"] = float(lat)
+        mode = self.settings.get("monitors_mode", "mirror")
+        if mode == "independent":
+            from .monitors import monitor_config_for, set_monitor_config
+            cfg = monitor_config_for(self.settings, self._active_monitor_index())
+            cfg["center_lon"] = float(lon)
+            cfg["center_lat"] = float(lat)
+            set_monitor_config(self.settings, self._active_monitor_index(), cfg)
+        else:
+            # Mirror/span: mirror into the global fields AND the visible
+            # Map & View tab spinbox/slider so the two UIs stay in sync.
+            self.center_lon_spin.blockSignals(True)
+            self.center_lon_spin.setValue(int(round(lon)))
+            self.center_lon_slider.setValue(int(round(lon)))
+            self.center_lon_spin.blockSignals(False)
+            self.settings["center_lon"] = float(lon)
+            self.settings["center_lat"] = float(lat)
         settings_module.save_settings(self.settings)
         self._schedule_preview_update()
 
     def _pick_void_fill_color(self) -> None:
         from PySide6.QtWidgets import QColorDialog
         current = QColor(self.settings.get("monitor_configs", {})
-                         .get("0", {}).get("void_fill_color", "#000000"))
+                         .get(str(self._active_monitor_index()), {}).get("void_fill_color", "#000000"))
         chosen = QColorDialog.getColor(current, self, "Void fill colour")
         if chosen.isValid():
             from .monitors import monitor_config_for, set_monitor_config
-            cfg = monitor_config_for(self.settings, 0)
+            cfg = monitor_config_for(self.settings, self._active_monitor_index())
             cfg["void_fill_color"] = chosen.name()
-            set_monitor_config(self.settings, 0, cfg)
+            set_monitor_config(self.settings, self._active_monitor_index(), cfg)
             settings_module.save_settings(self.settings)
             self._refresh_void_fill_swatch()
             self._schedule_preview_update()
@@ -603,31 +635,82 @@ class MainWindow(QMainWindow):
     def _pick_void_fill_image(self) -> None:
         from PySide6.QtWidgets import QFileDialog
         from .monitors import monitor_config_for, set_monitor_config
-        cfg = monitor_config_for(self.settings, 0)
+        cfg = monitor_config_for(self.settings, self._active_monitor_index())
         start_dir = cfg.get("void_fill_image") or ""
         path, _ = QFileDialog.getOpenFileName(
             self, "Pick a background image", start_dir,
             "Images (*.png *.jpg *.jpeg *.bmp *.webp)")
         if path:
             cfg["void_fill_image"] = path
-            set_monitor_config(self.settings, 0, cfg)
+            set_monitor_config(self.settings, self._active_monitor_index(), cfg)
             settings_module.save_settings(self.settings)
             self._refresh_void_fill_swatch()
             self._schedule_preview_update()
 
     def _clear_void_fill_image(self) -> None:
         from .monitors import monitor_config_for, set_monitor_config
-        cfg = monitor_config_for(self.settings, 0)
+        cfg = monitor_config_for(self.settings, self._active_monitor_index())
         if cfg.get("void_fill_image"):
             cfg["void_fill_image"] = None
-            set_monitor_config(self.settings, 0, cfg)
+            set_monitor_config(self.settings, self._active_monitor_index(), cfg)
             settings_module.save_settings(self.settings)
             self._refresh_void_fill_swatch()
             self._schedule_preview_update()
 
+    def _active_monitor_index(self) -> int:
+        """Which monitor's per-monitor config the Displays-tab controls
+        are currently editing. Only meaningful in "independent" mode -
+        elsewhere everything routes through monitor 0's config, which
+        acts as the "global" config for span mode too."""
+        mode = self.settings.get("monitors_mode", "mirror")
+        if mode == "independent" and hasattr(self, "monitor_editor_combo"):
+            idx = self.monitor_editor_combo.currentData()
+            if idx is not None:
+                return int(idx)
+        return 0
+
+    def _rebuild_monitor_editor_combo(self) -> None:
+        """Populate the 'Editing monitor' dropdown from the detected
+        layout. Called after a Refresh or on first show."""
+        layout = getattr(self, "_current_layout", None)
+        if layout is None or not hasattr(self, "monitor_editor_combo"):
+            return
+        self.monitor_editor_combo.blockSignals(True)
+        self.monitor_editor_combo.clear()
+        for m in layout.monitors:
+            tag = " (primary)" if m.is_primary else ""
+            self.monitor_editor_combo.addItem(
+                f"Monitor #{m.index + 1}{tag} – {m.width}×{m.height}", m.index)
+        self.monitor_editor_combo.blockSignals(False)
+        mode = self.settings.get("monitors_mode", "mirror")
+        self.monitor_editor_row.setVisible(mode == "independent")
+
+    def _on_active_monitor_changed(self, _idx: int) -> None:
+        """User picked a different monitor to edit - reload the Displays
+        tab controls from that monitor's config so they show its current
+        zoom/focal/position/void, not the previous monitor's values."""
+        if getattr(self, "_initializing", False):
+            return
+        from .monitors import monitor_config_for
+        cfg = monitor_config_for(self.settings, self._active_monitor_index())
+        # Reload without emitting settings-changed - switching which
+        # monitor is being edited isn't itself an edit.
+        self._initializing = True
+        try:
+            self.map_zoom_slider.setValue(int(cfg.get("zoom", 1.0) * 100))
+            self.map_pos_x_spin.setValue(int(cfg.get("map_pos_x", 0)))
+            self.map_pos_y_spin.setValue(int(cfg.get("map_pos_y", 0)))
+            self.map_focal_preview.set_focal(
+                cfg.get("center_lon", self.settings.get("center_lon", 0.0)),
+                cfg.get("center_lat", self.settings.get("center_lat", 0.0)),
+            )
+            self._refresh_void_fill_swatch()
+        finally:
+            self._initializing = False
+
     def _refresh_void_fill_swatch(self) -> None:
         from .monitors import monitor_config_for
-        cfg = monitor_config_for(self.settings, 0)
+        cfg = monitor_config_for(self.settings, self._active_monitor_index())
         color = cfg["void_fill_color"]
         self.void_fill_btn.setStyleSheet(
             f"background-color: {color}; border: 1px solid #666;")
@@ -824,15 +907,26 @@ class MainWindow(QMainWindow):
         self.settings["night_view"] = self.night_view_check.isChecked()
         # --- Multi-monitor / Displays tab ---
         if hasattr(self, "monitors_mode_combo"):
-            self.settings["monitors_mode"] = \
-                self.monitors_mode_combo.currentData() or "mirror"
+            new_mode = self.monitors_mode_combo.currentData() or "mirror"
+            mode_changed = self.settings.get("monitors_mode") != new_mode
+            self.settings["monitors_mode"] = new_mode
+            # Show/hide the per-monitor editor selector as the mode
+            # changes (only useful when each monitor can differ).
+            if hasattr(self, "monitor_editor_row"):
+                self.monitor_editor_row.setVisible(new_mode == "independent")
+            # Switching INTO independent for the first time: reload the
+            # UI controls from monitor 0's config so they reflect its
+            # settings rather than whatever the last edit left.
+            if mode_changed and new_mode == "independent":
+                self._on_active_monitor_changed(0)
         if hasattr(self, "map_zoom_slider"):
             zoom_pct = self.map_zoom_slider.value()
             self.map_zoom_value_label.setText(f"{zoom_pct}%")
-            # Zoom lives in monitor #0's config for now (Phase 2.6 will
-            # extend this to per-monitor in "independent" mode).
+            # Zoom lives in the currently-edited monitor's config: in
+            # independent mode each monitor has its own; in mirror/span
+            # monitor 0's config is used for the whole thing.
             from .monitors import monitor_config_for, set_monitor_config
-            cfg = monitor_config_for(self.settings, 0)
+            cfg = monitor_config_for(self.settings, self._active_monitor_index())
             cfg["zoom"] = zoom_pct / 100.0
             # Persist the position spinboxes alongside zoom - they're
             # part of the same "how does the map sit on the desktop"
@@ -840,7 +934,7 @@ class MainWindow(QMainWindow):
             if hasattr(self, "map_pos_x_spin"):
                 cfg["map_pos_x"] = int(self.map_pos_x_spin.value())
                 cfg["map_pos_y"] = int(self.map_pos_y_spin.value())
-            set_monitor_config(self.settings, 0, cfg)
+            set_monitor_config(self.settings, self._active_monitor_index(), cfg)
             self._update_screen_area_preview()
         self.settings["center_lon"] = float(self.center_lon_spin.value())
         self.settings["twilight_width_deg"] = float(self.twilight_slider.value())

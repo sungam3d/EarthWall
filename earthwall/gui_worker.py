@@ -90,6 +90,7 @@ class RenderWorker(QThread):
                                  .get("0", {}).get("void_fill_color", "#000000")),
                 void_fill_image=(self.settings.get("monitor_configs", {})
                                  .get("0", {}).get("void_fill_image")),
+                monitor_configs=self.settings.get("monitor_configs"),
             )
 
             if self.apply_wallpaper:

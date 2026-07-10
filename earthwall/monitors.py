@@ -148,10 +148,14 @@ def detect_layout() -> MonitorLayout:
 
 DEFAULT_MONITOR_CONFIG = {
     "zoom": 1.0,        # 1.0 = fit the whole map into the screen
+    # Per-monitor focal point (used in "independent" mode only). In mirror
+    # / span modes the global settings["center_lon"] / ["center_lat"]
+    # apply to everything; independent mode gives each screen its own.
+    "center_lon": 0.0,
+    "center_lat": 0.0,
     # Absolute pixel position of the map's top-left corner within the
-    # virtual desktop. 0 = "auto-centre" behaviour handled by the
-    # renderer (map centred both axes). Advanced users can pin these
-    # to exact numbers via the Displays tab spinboxes.
+    # virtual desktop. 0 = "auto-centre" (renderer chooses); non-zero
+    # pins to exact pixels. Only relevant in span mode.
     "map_pos_x": 0,
     "map_pos_y": 0,
     "offset_x": 0.0,    # -1.0..+1.0, fraction of screen width; +ve = pan right
