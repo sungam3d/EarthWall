@@ -65,6 +65,8 @@ class RenderWorker(QThread):
                 night_darkness=self.settings.get("night_darkness", 0.85),
                 cloud_layer=cloud_layer,
                 cloud_opacity=self.settings.get("cloud_opacity", 0.35),
+                cloud_density=self.settings.get("cloud_density", 1.0),
+                night_view=self.settings.get("night_view", True),
                 temp_units=self.settings.get("temp_units", "C"),
                 weather_by_city=weather_by_city,
             )

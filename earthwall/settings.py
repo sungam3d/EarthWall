@@ -22,6 +22,8 @@ DEFAULTS = {
     "autostart": False,
     "live_clouds": False,
     "cloud_opacity": 0.35,
+    "cloud_density": 1.0,   # 1.0 = raw satellite coverage; lower thins the field
+    "night_view": True,     # False = full daylight map, no terminator/night side
     "paused": False,
     "temp_units": "C",  # "C" or "F"
 }

@@ -8,7 +8,8 @@ from PySide6.QtGui import QPixmap, QColor
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox,
     QHBoxLayout, QHeaderView, QLabel, QListWidget, QListWidgetItem,
-    QMainWindow, QMessageBox, QProgressBar, QPushButton, QSizePolicy, QSlider, QSpinBox,
+    QMainWindow, QMessageBox, QProgressBar, QPushButton, QScrollArea,
+    QSizePolicy, QSlider, QSpinBox,
     QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
@@ -30,7 +31,11 @@ PREVIEW_OUTPUT = Path.home() / ".cache" / "earthwall" / "preview.jpg"
 # Deliberately small - this is what re-renders on every tweak (city added,
 # slider dragged, map switched), so it needs to feel instant. The actual
 # wallpaper still renders at full resolution via the timer / Update Now.
-PREVIEW_WIDTH, PREVIEW_HEIGHT = 1280, 640
+# NOTE: only the width is fixed - the height is derived from the current
+# target resolution's aspect ratio (see _preview_render_size), so slider-
+# triggered previews and full "Update Now" renders always have the same
+# shape and the preview never stretches between the two.
+PREVIEW_WIDTH = 1280
 
 # How long to wait after the last change before actually re-rendering the
 # preview - stops a slider drag from queuing up dozens of renders.
@@ -55,7 +60,10 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("EarthWall")
-        self.setMinimumSize(720, 640)
+        # Wide enough for the longest form rows, tall enough for preview +
+        # the tallest tab without scrolling on a typical 1080p screen.
+        self.setMinimumSize(760, 680)
+        self.resize(820, 860)
 
         self.settings = settings_module.load_settings()
         self.cities = settings_module.load_cities()
@@ -156,9 +164,12 @@ class MainWindow(QMainWindow):
 
         # --- Tabs ----------------------------------------------------------
         tabs = QTabWidget()
-        tabs.addTab(self._build_general_tab(), "General")
-        tabs.addTab(self._build_map_tab(), "Map && View")
-        tabs.addTab(self._build_cities_tab(), "Cities")
+        # Every tab lives inside a scroll area: whatever the platform font/
+        # theme does to widget heights, no setting can ever be cut off -
+        # worst case a scrollbar appears instead.
+        tabs.addTab(self._make_scrollable(self._build_general_tab()), "General")
+        tabs.addTab(self._make_scrollable(self._build_map_tab()), "Map && View")
+        tabs.addTab(self._make_scrollable(self._build_cities_tab()), "Cities")
         root.addWidget(tabs, stretch=1)
 
     def _build_general_tab(self) -> QWidget:
@@ -211,7 +222,30 @@ class MainWindow(QMainWindow):
         self.cloud_opacity_slider.valueChanged.connect(self._on_settings_changed)
         opacity_row.addWidget(self.cloud_opacity_slider)
         clouds_layout.addLayout(opacity_row)
+
+        # Cloud DENSITY thins out the cloud field itself (wispy cloud is
+        # culled first, solid cores stay) - distinct from opacity, which
+        # fades everything uniformly. 100% = the raw satellite coverage.
+        density_row = QHBoxLayout()
+        density_row.addWidget(QLabel("Cloud density:"))
+        self.cloud_density_slider = ClickJumpSlider(Qt.Horizontal)
+        self.cloud_density_slider.setRange(0, 100)
+        self.cloud_density_slider.setValue(100)
+        self.cloud_density_slider.valueChanged.connect(self._on_settings_changed)
+        density_row.addWidget(self.cloud_density_slider)
+        self.cloud_density_value_label = QLabel("100%")
+        density_row.addWidget(self.cloud_density_value_label)
+        clouds_layout.addLayout(density_row)
         layout.addWidget(clouds_box)
+
+        night_box = QGroupBox("Night side")
+        night_box_layout = QVBoxLayout(night_box)
+        self.night_view_check = QCheckBox(
+            "Show night side (city lights + day/night terminator)")
+        self.night_view_check.setChecked(True)
+        self.night_view_check.toggled.connect(self._on_settings_changed)
+        night_box_layout.addWidget(self.night_view_check)
+        layout.addWidget(night_box)
 
         temp_box = QGroupBox("City weather display")
         temp_form = QFormLayout(temp_box)
@@ -224,6 +258,14 @@ class MainWindow(QMainWindow):
 
         layout.addStretch()
         return w
+
+    @staticmethod
+    def _make_scrollable(page: QWidget) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setWidget(page)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        return scroll
 
     def _build_map_tab(self) -> QWidget:
         w = QWidget()
@@ -371,6 +413,13 @@ class MainWindow(QMainWindow):
         self.cloud_opacity_slider.blockSignals(True)
         self.cloud_opacity_slider.setValue(int(s["cloud_opacity"] * 100))
         self.cloud_opacity_slider.blockSignals(False)
+        self.cloud_density_slider.blockSignals(True)
+        self.cloud_density_slider.setValue(int(s.get("cloud_density", 1.0) * 100))
+        self.cloud_density_slider.blockSignals(False)
+        self.cloud_density_value_label.setText(f"{self.cloud_density_slider.value()}%")
+        self.night_view_check.blockSignals(True)
+        self.night_view_check.setChecked(bool(s.get("night_view", True)))
+        self.night_view_check.blockSignals(False)
 
         self.center_lon_spin.blockSignals(True)
         self.center_lon_spin.setValue(int(s["center_lon"]))
@@ -414,6 +463,9 @@ class MainWindow(QMainWindow):
             self.settings["resolution"] = [self.width_spin.value(), self.height_spin.value()]
         self.settings["live_clouds"] = self.clouds_check.isChecked()
         self.settings["cloud_opacity"] = self.cloud_opacity_slider.value() / 100
+        self.settings["cloud_density"] = self.cloud_density_slider.value() / 100
+        self.cloud_density_value_label.setText(f"{self.cloud_density_slider.value()}%")
+        self.settings["night_view"] = self.night_view_check.isChecked()
         self.settings["center_lon"] = float(self.center_lon_spin.value())
         self.settings["twilight_width_deg"] = float(self.twilight_slider.value())
         self.twilight_value_label.setText(f"{self.twilight_slider.value()}°")
@@ -604,6 +656,11 @@ class MainWindow(QMainWindow):
         """(Re)start the debounce timer - rapid-fire changes (like dragging
         the center-longitude slider) collapse into a single render once
         things settle, instead of queuing up a render per tick."""
+        # Resolution may have changed - keep the container's shape in sync
+        # with the target aspect ratio before the next render lands.
+        self._update_preview_size()
+        self._rescale_preview()
+        self._position_progress_bar()
         self._preview_debounce.start(PREVIEW_DEBOUNCE_MS)
 
     def _update_busy_indicator(self) -> None:
@@ -649,9 +706,10 @@ class MainWindow(QMainWindow):
             # fire again shortly after it finishes if more changes came in.
             self._preview_debounce.start(PREVIEW_DEBOUNCE_MS)
             return
+        pw, ph = self._preview_render_size()
         self._preview_worker = RenderWorker(
             dict(self.settings), list(self.cities), str(PREVIEW_OUTPUT),
-            PREVIEW_WIDTH, PREVIEW_HEIGHT, apply_wallpaper=False,
+            pw, ph, apply_wallpaper=False,
         )
         self._preview_worker.finished_ok.connect(self._on_preview_render_done)
         self._preview_worker.finished_err.connect(self._on_render_error)
@@ -676,6 +734,17 @@ class MainWindow(QMainWindow):
         if self._preview_worker is not None and self._preview_worker.isRunning():
             self._preview_worker.wait(5000)
 
+    def _preview_render_size(self) -> tuple[int, int]:
+        """Preview render dimensions: fixed small width, height matching the
+        aspect ratio of the CURRENT target resolution. Keeping the preview
+        the same shape as the real wallpaper is what prevents the preview
+        from appearing stretched after a slider tweak vs. after Update Now
+        (which renders at the real resolution and is shown in the same
+        label)."""
+        w, h = self._current_resolution()
+        w = max(1, w)
+        return PREVIEW_WIDTH, max(1, round(PREVIEW_WIDTH * h / w))
+
     def _update_preview_size(self) -> None:
         """Set a fixed container height derived from the window width, so
         the preview always keeps a 2:1 aspect ratio (matching the map
@@ -686,8 +755,10 @@ class MainWindow(QMainWindow):
         # Cap the preview height so it doesn't dominate the window - the
         # tabs below it need vertical space too.
         max_h = max(180, min(360, self.height() // 3))
-        target_h = min(max_h, available_w // 2)
-        self.preview_container.setFixedHeight(target_h)
+        rw, rh = self._current_resolution()
+        aspect = rh / max(1, rw)  # follow the real wallpaper's shape
+        target_h = min(max_h, int(available_w * aspect))
+        self.preview_container.setFixedHeight(max(120, target_h))
 
     def _show_preview_pixmap(self, output_path: str) -> None:
         self._last_preview_pixmap = QPixmap(output_path)

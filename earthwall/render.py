@@ -145,11 +145,32 @@ def _composite_day_night(day_img: Image.Image, night_img: Image.Image,
 
 
 def _apply_clouds(base: Image.Image, cloud_layer: Image.Image, center_lon: float,
-                   opacity: float) -> Image.Image:
+                   opacity: float, density: float = 1.0) -> Image.Image:
+    """Overlay the live cloud alpha map.
+
+    opacity (0..1): overall transparency of ALL cloud - a uniform fade.
+    density (0..1): overall cloud COVERAGE - thins the cloud field itself.
+        Implemented as an alpha threshold-and-restretch: wispy/thin cloud
+        (low alpha) disappears first while dense storm cores survive, so
+        at 50% density you still see distinct, solid-looking clouds - just
+        fewer of them - rather than a uniformly ghostly haze (which is
+        what lowering opacity alone gives you). Less physically real, far
+        nicer than the whole desktop being blanked out under overcast.
+    """
     cloud_layer = cloud_layer.resize(base.size, Image.LANCZOS)
     cloud_layer = _roll_longitude(cloud_layer, center_lon)
 
     r, g, b, a = cloud_layer.split()
+    density = max(0.0, min(1.0, density))
+    if density < 1.0:
+        # Threshold rises as density falls; alpha below it is culled and
+        # the remainder is re-stretched back to full range so surviving
+        # cloud keeps its solid look instead of also going translucent.
+        t = int(255 * (1.0 - density))
+        if t >= 255:
+            a = a.point(lambda p: 0)
+        else:
+            a = a.point(lambda p, t=t: 0 if p <= t else int((p - t) * 255 / (255 - t)))
     a = a.point(lambda p: int(p * opacity))
     cloud_layer = Image.merge("RGBA", (r, g, b, a))
 
@@ -540,6 +561,8 @@ def render(output_path: str | Path, width: int, height: int,
            night_darkness: float = 0.85,
            cloud_layer: Image.Image | None = None,
            cloud_opacity: float = 0.35,
+           cloud_density: float = 1.0,
+           night_view: bool = True,
            temp_units: str = "C",
            weather_by_city: dict | None = None) -> None:
     """Render one wallpaper frame and save it to `output_path`."""
@@ -558,13 +581,18 @@ def render(output_path: str | Path, width: int, height: int,
         day_img = day_img.resize((width, height), Image.LANCZOS)
         night_img = night_img.resize((width, height), Image.LANCZOS)
 
-    composite = _composite_day_night(day_img, night_img, sub_lat, sub_lon,
-                                      twilight_width_deg, night_darkness)
+    if night_view:
+        composite = _composite_day_night(day_img, night_img, sub_lat, sub_lon,
+                                          twilight_width_deg, night_darkness)
+    else:
+        # Night view disabled: show the full daylight map everywhere.
+        composite = day_img.convert("RGB")
     composite = _roll_longitude(composite, center_lon)
     composite = composite.filter(ImageFilter.UnsharpMask(radius=1.5, percent=60, threshold=2))
 
     if cloud_layer is not None:
-        composite = _apply_clouds(composite, cloud_layer, center_lon, cloud_opacity)
+        composite = _apply_clouds(composite, cloud_layer, center_lon,
+                                   cloud_opacity, cloud_density)
 
     composite = _draw_city_markers(composite, cities, when.astimezone(),
                                     center_lon, temp_units=temp_units,
