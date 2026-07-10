@@ -1,4 +1,4 @@
-![EarthWall](assets/icon/Transparent/convertico-icon-transparent_256x256.png)
+![EarthWall](assets/Icon/Transparent/convertico-icon-transparent_256x256.png)
 # EarthWall
 
 A live, real-time Earth wallpaper for Linux: flat equirectangular map,
