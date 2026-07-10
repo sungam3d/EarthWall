@@ -16,6 +16,13 @@ from . import autostart
 from .gui_main_window import MainWindow
 
 ICON_PATH = Path(__file__).resolve().parent.parent / "assets" / "icon.png"
+# Tray gets its own transparent variant when available - the desktop's tray
+# often draws on tinted backgrounds where the rounded-square variant's
+# opaque edges look boxed-in. Fall back to the main icon if the transparent
+# one isn't shipped.
+TRAY_ICON_PATH = Path(__file__).resolve().parent.parent / "assets" / "icon-tray.png"
+if not TRAY_ICON_PATH.exists():
+    TRAY_ICON_PATH = ICON_PATH
 
 
 def main() -> None:
@@ -31,11 +38,12 @@ def main() -> None:
     icon = QIcon(str(ICON_PATH)) if ICON_PATH.exists() else app.style().standardIcon(
         app.style().StandardPixmap.SP_ComputerIcon
     )
+    tray_icon = QIcon(str(TRAY_ICON_PATH)) if TRAY_ICON_PATH.exists() else icon
 
     window = MainWindow()
     window.setWindowIcon(icon)
 
-    tray = QSystemTrayIcon(icon)
+    tray = QSystemTrayIcon(tray_icon)
     tray.setToolTip("EarthWall - live Earth wallpaper")
 
     menu = QMenu()

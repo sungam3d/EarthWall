@@ -8,13 +8,14 @@ from PySide6.QtGui import QPixmap, QColor
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox,
     QHBoxLayout, QHeaderView, QLabel, QListWidget, QListWidgetItem,
-    QMainWindow, QMessageBox, QProgressBar, QPushButton, QSlider, QSpinBox,
+    QMainWindow, QMessageBox, QProgressBar, QPushButton, QSizePolicy, QSlider, QSpinBox,
     QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from . import autostart, maps as maps_module, settings as settings_module
 from .gui_city_dialog import CityDialog
 from .gui_map_dialog import ImportMapDialog
+from .gui_widgets import ClickJumpSlider
 from .gui_worker import RenderWorker
 from .wallpaper import pick_next_wallpaper_path
 
@@ -96,20 +97,29 @@ class MainWindow(QMainWindow):
         preview_box = QGroupBox("Preview")
         preview_layout = QVBoxLayout(preview_box)
 
-        # The preview label and the progress bar live in a stacked
-        # container so the progress bar can overlay the bottom of the
-        # preview instead of pushing everything below it. Otherwise
-        # showing/hiding the bar causes the preview window to jump around
-        # by 4-10 pixels every time a render starts or finishes - very
-        # noticeable while dragging sliders.
+        # The preview container has a FIXED height set from the window
+        # width (2:1 aspect ratio matching the equirectangular map), and
+        # the QLabel inside is force-scaled to fit. Without this, showing
+        # a pixmap of a different aspect ratio (or switching from the
+        # "rendering..." text placeholder to an image) causes the QLabel
+        # to resize its minimum, which reflows the container and the whole
+        # window - the "widening and shrinking" the user was seeing while
+        # changing settings.
         self.preview_container = QWidget()
-        self.preview_container.setMinimumHeight(220)
+        self.preview_container.setSizePolicy(
+            QSizePolicy.Preferred, QSizePolicy.Fixed,
+        )
         container_layout = QVBoxLayout(self.preview_container)
         container_layout.setContentsMargins(0, 0, 0, 0)
 
         self.preview_label = QLabel("No preview yet - rendering…", self.preview_container)
         self.preview_label.setAlignment(Qt.AlignCenter)
         self.preview_label.setStyleSheet("background:#111; color:#888; border-radius:6px;")
+        self.preview_label.setScaledContents(False)
+        self.preview_label.setMinimumSize(1, 1)  # allow shrinking; parent controls actual size
+        self.preview_label.setSizePolicy(
+            QSizePolicy.Ignored, QSizePolicy.Ignored,
+        )
         container_layout.addWidget(self.preview_label)
 
         # Parented to the container (not added to a layout) so we can
@@ -196,7 +206,7 @@ class MainWindow(QMainWindow):
 
         opacity_row = QHBoxLayout()
         opacity_row.addWidget(QLabel("Cloud opacity:"))
-        self.cloud_opacity_slider = QSlider(Qt.Horizontal)
+        self.cloud_opacity_slider = ClickJumpSlider(Qt.Horizontal)
         self.cloud_opacity_slider.setRange(0, 100)
         self.cloud_opacity_slider.valueChanged.connect(self._on_settings_changed)
         opacity_row.addWidget(self.cloud_opacity_slider)
@@ -241,7 +251,7 @@ class MainWindow(QMainWindow):
             "(0° = Prime Meridian/Africa-Europe centered, the default)."
         ))
         slider_row = QHBoxLayout()
-        self.center_lon_slider = QSlider(Qt.Horizontal)
+        self.center_lon_slider = ClickJumpSlider(Qt.Horizontal)
         self.center_lon_slider.setRange(-180, 180)
         self.center_lon_spin = QSpinBox()
         self.center_lon_spin.setRange(-180, 180)
@@ -266,7 +276,7 @@ class MainWindow(QMainWindow):
         twilight_box = QGroupBox("Day/night edge softness")
         twilight_layout = QHBoxLayout(twilight_box)
         twilight_layout.addWidget(QLabel("Sharp"))
-        self.twilight_slider = QSlider(Qt.Horizontal)
+        self.twilight_slider = ClickJumpSlider(Qt.Horizontal)
         self.twilight_slider.setRange(1, 18)
         self.twilight_slider.setToolTip(
             "Width of the twilight blend along the terminator, in degrees. "
@@ -284,7 +294,7 @@ class MainWindow(QMainWindow):
         night_box = QGroupBox("Night side darkness")
         night_layout = QHBoxLayout(night_box)
         night_layout.addWidget(QLabel("Show landscape"))
-        self.night_darkness_slider = QSlider(Qt.Horizontal)
+        self.night_darkness_slider = ClickJumpSlider(Qt.Horizontal)
         self.night_darkness_slider.setRange(0, 100)
         self.night_darkness_slider.setToolTip(
             "How dark the unlit night side gets. Higher = deeper black with "
@@ -666,6 +676,19 @@ class MainWindow(QMainWindow):
         if self._preview_worker is not None and self._preview_worker.isRunning():
             self._preview_worker.wait(5000)
 
+    def _update_preview_size(self) -> None:
+        """Set a fixed container height derived from the window width, so
+        the preview always keeps a 2:1 aspect ratio (matching the map
+        itself) and never changes size in response to what's drawn into
+        it. Called on resize and once at startup."""
+        # Available width minus the group box border/padding overhead.
+        available_w = max(320, self.centralWidget().width() - 40)
+        # Cap the preview height so it doesn't dominate the window - the
+        # tabs below it need vertical space too.
+        max_h = max(180, min(360, self.height() // 3))
+        target_h = min(max_h, available_w // 2)
+        self.preview_container.setFixedHeight(target_h)
+
     def _show_preview_pixmap(self, output_path: str) -> None:
         self._last_preview_pixmap = QPixmap(output_path)
         self._rescale_preview()
@@ -673,10 +696,14 @@ class MainWindow(QMainWindow):
     def _rescale_preview(self) -> None:
         if self._last_preview_pixmap is None or self._last_preview_pixmap.isNull():
             return
+        # Scale to the container's CURRENT geometry, not the label's - the
+        # label's size trails the container by one layout pass, and using
+        # a stale label size makes the pixmap smaller than the container
+        # and the container's dark background bleeds through around it.
+        w = max(320, self.preview_container.width())
+        h = max(180, self.preview_container.height())
         scaled = self._last_preview_pixmap.scaled(
-            max(320, self.preview_label.width()),
-            max(180, self.preview_label.height()),
-            Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.preview_label.setPixmap(scaled)
 
     def _position_progress_bar(self) -> None:
@@ -692,6 +719,15 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        self._update_preview_size()
+        self._rescale_preview()
+        self._position_progress_bar()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        # First show is when the widget geometry becomes real - initialise
+        # the fixed preview height then so it doesn't briefly show at zero.
+        self._update_preview_size()
         self._rescale_preview()
         self._position_progress_bar()
 

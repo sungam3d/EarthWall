@@ -198,63 +198,166 @@ def _field_style(city: dict, field: str, base_font_size: int,
     }
 
 
-def _build_label_segments(city: dict, now_utc: datetime,
-                            weather_reading, temp_units: str,
-                            base_font_size: int, default_color: tuple) -> list[dict]:
-    """Return a list of styled segments, one per label line. Each segment is
-    a dict {text, font, font_size, color}. Fields with show_* == False are
-    simply skipped."""
-    segments: list[dict] = []
+# Default label layout: each row is a list of fields that render side by
+# side. Fields not turned on (show_*=False) are dropped; empty rows are
+# skipped. If a city has no `label_layout` set, this is used.
+DEFAULT_LABEL_LAYOUT = [
+    ["name", "time"],
+    ["weather"],
+    ["notes"],
+]
 
-    if city.get("show_name", True):
-        style = _field_style(city, "name", base_font_size, default_color)
-        style["text"] = city.get("name", "Unnamed")
-        segments.append(style)
 
-    if city.get("show_time", True):
+def _weather_text(weather_reading, temp_units: str, city: dict) -> str:
+    """Build the weather line text, honoring per-city overrides.
+
+    Supported weather-format overrides in the city dict:
+      weather_show_emoji : bool (default True) - include the ☀/🌧/etc glyph
+      weather_show_temp  : bool (default True) - include "24°C"
+      weather_show_label : bool (default True) - include "Clear"/"Rain"
+      weather_label_map  : dict {condition -> replacement} - lets the user
+                          say "Sunny" instead of "Clear", "Wet" instead of
+                          "Rain", etc. Case-insensitive lookup on the API's
+                          label ("Clear", "Overcast", "Light rain", ...).
+      weather_custom_format : str - overrides everything else; a Python
+                          format string with placeholders {emoji}, {temp},
+                          {label}, {code}. If set, that string is rendered
+                          verbatim (with placeholders substituted).
+    """
+    if weather_reading is None:
+        return ""
+
+    label = weather_reading.label or ""
+    label_map = city.get("weather_label_map") or {}
+    if isinstance(label_map, dict) and label:
+        # Case-insensitive key match; user might type "clear" or "Clear".
+        for src, dst in label_map.items():
+            if src.strip().lower() == label.strip().lower():
+                label = dst
+                break
+
+    custom = city.get("weather_custom_format")
+    if custom:
         try:
-            local_time = now_utc.astimezone(ZoneInfo(city["tz"])).strftime("%H:%M")
+            return custom.format(
+                emoji=weather_reading.emoji,
+                temp=weather_reading.temp_display(temp_units),
+                label=label,
+                code=weather_reading.code,
+            )
+        except (KeyError, IndexError):
+            pass  # Bad format string - fall through to the default composition.
+
+    parts = []
+    if city.get("weather_show_emoji", True) and weather_reading.emoji:
+        parts.append(weather_reading.emoji)
+    if city.get("weather_show_temp", True):
+        parts.append(weather_reading.temp_display(temp_units))
+    if city.get("weather_show_label", True) and label and label != "--":
+        parts.append(label)
+    return "  ".join(parts)
+
+
+def _make_field_segment(field: str, city: dict, now_utc: datetime,
+                         weather_reading, temp_units: str,
+                         base_font_size: int, default_color: tuple) -> dict | None:
+    """Build one styled segment for a given field (name/time/weather/notes),
+    or return None if that field is disabled or has no content."""
+    if field == "name":
+        if not city.get("show_name", True):
+            return None
+        seg = _field_style(city, "name", base_font_size, default_color)
+        seg["text"] = city.get("name", "Unnamed")
+        return seg
+    if field == "time":
+        if not city.get("show_time", True):
+            return None
+        try:
+            text = now_utc.astimezone(ZoneInfo(city["tz"])).strftime("%H:%M")
         except Exception:
-            local_time = "--:--"
-        style = _field_style(city, "time", base_font_size, default_color)
-        style["text"] = local_time
-        segments.append(style)
+            text = "--:--"
+        seg = _field_style(city, "time", base_font_size, default_color)
+        seg["text"] = text
+        return seg
+    if field == "weather":
+        if not city.get("show_weather", False):
+            return None
+        text = _weather_text(weather_reading, temp_units, city)
+        if not text:
+            return None
+        seg = _field_style(city, "weather", base_font_size, default_color)
+        seg["text"] = text
+        return seg
+    if field == "notes":
+        # Notes are special: one field can produce MULTIPLE wrapped lines.
+        # Callers handle this via _build_label_rows below.
+        return None
+    return None
 
-    if city.get("show_weather", False) and weather_reading is not None:
-        w_line = f"{weather_reading.emoji}  {weather_reading.temp_display(temp_units)}".strip()
-        if weather_reading.label and weather_reading.label != "--":
-            w_line = f"{w_line}  {weather_reading.label}"
-        style = _field_style(city, "weather", base_font_size, default_color)
-        style["text"] = w_line
-        segments.append(style)
 
-    if city.get("show_notes", False):
-        note = (city.get("notes") or "").strip()
-        if note:
-            note_style = _field_style(city, "notes", base_font_size, default_color)
-            words = note.split()
-            wrapped: list[str] = []
-            current = ""
-            for word in words:
-                trial = f"{current} {word}".strip()
-                if len(trial) > 26 and current:
-                    wrapped.append(current)
-                    current = word
-                else:
-                    current = trial
-            if current:
-                wrapped.append(current)
-            for wrapped_line in wrapped[:3]:
-                seg = dict(note_style)  # copy so per-line dicts don't share
-                seg["text"] = wrapped_line
-                segments.append(seg)
+def _build_notes_segments(city: dict, base_font_size: int,
+                           default_color: tuple) -> list[dict]:
+    if not city.get("show_notes", False):
+        return []
+    note = (city.get("notes") or "").strip()
+    if not note:
+        return []
+    style = _field_style(city, "notes", base_font_size, default_color)
+    words = note.split()
+    wrapped: list[str] = []
+    current = ""
+    for word in words:
+        trial = f"{current} {word}".strip()
+        if len(trial) > 26 and current:
+            wrapped.append(current)
+            current = word
+        else:
+            current = trial
+    if current:
+        wrapped.append(current)
+    result = []
+    for line in wrapped[:3]:
+        seg = dict(style)
+        seg["text"] = line
+        result.append(seg)
+    return result
 
-    if not segments:
-        style = _field_style(city, "name", base_font_size, default_color)
-        style["text"] = city.get("name", "Unnamed")
-        segments.append(style)
 
-    return segments
+def _build_label_rows(city: dict, now_utc: datetime,
+                       weather_reading, temp_units: str,
+                       base_font_size: int, default_color: tuple) -> list[list[dict]]:
+    """Return a list of rows; each row is a list of styled segments that
+    render horizontally next to each other. Honors `city["label_layout"]`
+    if present, else uses DEFAULT_LABEL_LAYOUT.
+
+    Rows that resolve to no visible segments are dropped; if the whole
+    label ends up empty (all fields disabled), we fall back to just the
+    name so no city ever renders as a bare marker with no text."""
+    layout = city.get("label_layout") or DEFAULT_LABEL_LAYOUT
+    rows: list[list[dict]] = []
+
+    for row_fields in layout:
+        row: list[dict] = []
+        for field in row_fields:
+            if field == "notes":
+                # Notes rows expand into per-line segments below; the
+                # layout row contributes one "notes" bucket that becomes
+                # 1..N actual rows.
+                for seg in _build_notes_segments(city, base_font_size, default_color):
+                    rows.append([seg])
+                continue
+            seg = _make_field_segment(field, city, now_utc, weather_reading,
+                                        temp_units, base_font_size, default_color)
+            if seg is not None:
+                row.append(seg)
+        if row:
+            rows.append(row)
+
+    if not rows:
+        seg = _field_style(city, "name", base_font_size, default_color)
+        seg["text"] = city.get("name", "Unnamed")
+        rows.append([seg])
+    return rows
 
 
 def _draw_marker_shape(draw: ImageDraw.ImageDraw, x: int, y: int, r: int,
@@ -326,20 +429,38 @@ def _draw_city_markers(img: Image.Image, cities: list[dict], now_utc: datetime,
 
         weather_reading = weather_by_city.get(i)
         default_text_color = tuple(city.get("text_color", (255, 255, 255)))
-        segments = _build_label_segments(
+        rows = _build_label_rows(
             city, now_utc, weather_reading, temp_units,
             base_font_size, default_text_color,
         )
 
-        # Measure the label as a block of stacked, per-segment styled lines.
-        line_metrics = [draw.textbbox((0, 0), seg["text"], font=seg["font"])
-                         for seg in segments]
-        line_widths = [bbox[2] - bbox[0] for bbox in line_metrics]
-        line_heights = [bbox[3] - bbox[1] for bbox in line_metrics]
-        line_ybase = [bbox[1] for bbox in line_metrics]
+        # For each row, measure its total width (sum of segment widths +
+        # gaps between them) and its height (max of segment heights).
+        inter_field_gap = 12  # px between multiple fields on the same row
         line_spacing = 3
-        text_w = max(line_widths) if line_widths else 0
-        text_h = sum(line_heights) + line_spacing * max(0, len(segments) - 1)
+
+        row_metrics: list[dict] = []  # per-row {segments: [{seg, bbox}], w, h}
+        for row in rows:
+            seg_infos = []
+            for seg in row:
+                bbox = draw.textbbox((0, 0), seg["text"], font=seg["font"])
+                seg_infos.append({
+                    "seg": seg,
+                    "bbox": bbox,
+                    "w": bbox[2] - bbox[0],
+                    "h": bbox[3] - bbox[1],
+                    "ybase": bbox[1],
+                })
+            if not seg_infos:
+                continue
+            row_w = sum(s["w"] for s in seg_infos) + \
+                     inter_field_gap * (len(seg_infos) - 1)
+            row_h = max(s["h"] for s in seg_infos)
+            row_metrics.append({"segs": seg_infos, "w": row_w, "h": row_h})
+
+        text_w = max((r["w"] for r in row_metrics), default=0)
+        text_h = sum(r["h"] for r in row_metrics) + \
+                  line_spacing * max(0, len(row_metrics) - 1)
 
         pad_x, pad_y = 8, 5
         box_w = text_w + pad_x * 2
@@ -395,13 +516,19 @@ def _draw_city_markers(img: Image.Image, cities: list[dict], now_utc: datetime,
         if bg_alpha > 0:
             draw.rounded_rectangle(list(box), radius=6, fill=(15, 15, 20, bg_alpha))
 
-        # Draw each segment with its own font and colour.
+        # Draw each row: fields left-to-right, rows top-to-bottom.
         y_cursor = label_y + pad_y
-        for idx, seg in enumerate(segments):
-            draw.text((label_x + pad_x, y_cursor - line_ybase[idx]),
-                       seg["text"], font=seg["font"],
-                       fill=(*seg["color"], 255))
-            y_cursor += line_heights[idx] + line_spacing
+        for row in row_metrics:
+            x_cursor = label_x + pad_x
+            # Vertically center each field within the row's height so a
+            # small "24°C" doesn't sit off-baseline against a larger name.
+            for s in row["segs"]:
+                y_offset = (row["h"] - s["h"]) // 2
+                draw.text((x_cursor, y_cursor + y_offset - s["ybase"]),
+                           s["seg"]["text"], font=s["seg"]["font"],
+                           fill=(*s["seg"]["color"], 255))
+                x_cursor += s["w"] + inter_field_gap
+            y_cursor += row["h"] + line_spacing
 
     return img
 

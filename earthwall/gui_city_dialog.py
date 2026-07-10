@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
 
 from .city_database import CITY_DATABASE, search_cities
 from . import fonts as fonts_module
+from .gui_widgets import ClickJumpSlider
 
 try:
     from zoneinfo import available_timezones
@@ -140,6 +141,23 @@ class CityDialog(QDialog):
                     "scale": 0.85, "color": [200, 200, 200]},
     }
 
+    # Named layout presets. The first entry is the default. Users pick one
+    # from a dropdown; "Custom…" opens the row editor below for full control.
+    LAYOUT_PRESETS = [
+        ("Name + time / weather / notes  (default)",
+         [["name", "time"], ["weather"], ["notes"]]),
+        ("Everything on separate lines",
+         [["name"], ["time"], ["weather"], ["notes"]]),
+        ("Name / time + weather / notes",
+         [["name"], ["time", "weather"], ["notes"]]),
+        ("Name + time + weather (single row) / notes",
+         [["name", "time", "weather"], ["notes"]]),
+        ("Compact: name + time only",
+         [["name", "time"]]),
+        ("Name only",
+         [["name"]]),
+    ]
+
     def __init__(self, parent=None, existing: dict | None = None):
         super().__init__(parent)
         self.setWindowTitle("Edit City" if existing else "Add City")
@@ -169,7 +187,9 @@ class CityDialog(QDialog):
         tabs.addTab(self._build_basics_tab(e), "Basics")
         tabs.addTab(self._build_marker_tab(e), "Marker")
         tabs.addTab(self._build_placement_tab(e), "Placement")
+        tabs.addTab(self._wrap_scrollable(self._build_layout_tab(e)), "Layout")
         tabs.addTab(self._wrap_scrollable(self._build_text_tab(e)), "Text styling")
+        tabs.addTab(self._build_weather_tab(e), "Weather")
         tabs.addTab(self._build_notes_tab(e), "Notes")
         layout.addWidget(tabs)
 
@@ -299,7 +319,7 @@ class CityDialog(QDialog):
 
         bg_box = QGroupBox("Label background")
         bg_layout = QHBoxLayout(bg_box)
-        self.bg_alpha_slider = QSlider(Qt.Horizontal)
+        self.bg_alpha_slider = ClickJumpSlider(Qt.Horizontal)
         self.bg_alpha_slider.setRange(0, 255)
         self.bg_alpha_slider.setValue(int(e.get("background_alpha", 165)))
         self.bg_alpha_value = QLabel(str(self.bg_alpha_slider.value()))
@@ -336,6 +356,177 @@ class CityDialog(QDialog):
             ctrl.add_to_form(form, "")
             self._field_controls[field] = ctrl
             layout.addWidget(box)
+
+        layout.addStretch()
+        return w
+
+    # -------------------------------------------------------- Layout tab
+    def _build_layout_tab(self, e: dict) -> QWidget:
+        w = QWidget()
+        layout = QVBoxLayout(w)
+
+        intro = QLabel(
+            "Choose how the label's parts are arranged. Pick a preset for "
+            "a quick setup, or select \"Custom…\" to build your own layout "
+            "row by row.\n\n"
+            "Each row contains one or more fields that render side by "
+            "side. Fields not enabled on the Basics tab are automatically "
+            "skipped.")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        preset_box = QGroupBox("Preset")
+        preset_layout = QVBoxLayout(preset_box)
+        self.layout_preset_combo = QComboBox()
+        for label, _rows in self.LAYOUT_PRESETS:
+            self.layout_preset_combo.addItem(label)
+        self.layout_preset_combo.addItem("Custom…")
+
+        existing_layout = e.get("label_layout")
+        # Match the existing layout against known presets so users returning
+        # to the dialog see their choice pre-selected.
+        matched_idx = self.layout_preset_combo.count() - 1  # Custom by default
+        for i, (_, rows) in enumerate(self.LAYOUT_PRESETS):
+            if existing_layout == rows:
+                matched_idx = i
+                break
+        if existing_layout is None:
+            matched_idx = 0
+        self.layout_preset_combo.setCurrentIndex(matched_idx)
+        self.layout_preset_combo.currentIndexChanged.connect(self._on_layout_preset_changed)
+        preset_layout.addWidget(self.layout_preset_combo)
+        layout.addWidget(preset_box)
+
+        # Custom row editor: 4 rows, each with 4 checkboxes (name/time/
+        # weather/notes). Kept simple - a full drag-and-drop editor would
+        # be nicer but is a lot more code for a marginal usability win.
+        custom_box = QGroupBox("Custom rows (only used when preset is \"Custom…\")")
+        custom_layout = QVBoxLayout(custom_box)
+        custom_layout.addWidget(QLabel(
+            "Tick which fields appear on each row (top row is drawn first):"))
+
+        self._row_checkboxes: list[dict[str, QCheckBox]] = []
+        header_row = QHBoxLayout()
+        header_row.addWidget(QLabel("     "))  # row label spacer
+        for field in ["Name", "Time", "Weather", "Notes"]:
+            lbl = QLabel(field); lbl.setAlignment(Qt.AlignCenter)
+            lbl.setStyleSheet("color:#888;")
+            header_row.addWidget(lbl)
+        custom_layout.addLayout(header_row)
+
+        # Initialise from existing custom layout, or empty if this is
+        # coming from a preset choice.
+        seed_layout = existing_layout if matched_idx == self.layout_preset_combo.count() - 1 else []
+
+        for row_idx in range(4):
+            row_layout = QHBoxLayout()
+            row_layout.addWidget(QLabel(f"Row {row_idx + 1}:"))
+            row_checks = {}
+            for field in ["name", "time", "weather", "notes"]:
+                ck = QCheckBox()
+                is_set = (row_idx < len(seed_layout)
+                            and field in seed_layout[row_idx])
+                ck.setChecked(is_set)
+                row_layout.addWidget(ck, alignment=Qt.AlignCenter)
+                row_checks[field] = ck
+            custom_layout.addLayout(row_layout)
+            self._row_checkboxes.append(row_checks)
+
+        layout.addWidget(custom_box)
+        layout.addStretch()
+        return w
+
+    def _on_layout_preset_changed(self, idx: int) -> None:
+        # If the user picked a named preset, populate the custom editor
+        # to match so switching to Custom later is a small tweak, not a
+        # fresh start.
+        if idx < len(self.LAYOUT_PRESETS):
+            _, rows = self.LAYOUT_PRESETS[idx]
+            for row_idx, row_checks in enumerate(self._row_checkboxes):
+                row_fields = rows[row_idx] if row_idx < len(rows) else []
+                for field, ck in row_checks.items():
+                    ck.setChecked(field in row_fields)
+
+    def _current_layout(self) -> list[list[str]]:
+        """Read the resolved layout from either the preset selector or the
+        custom row grid, depending on which is active."""
+        idx = self.layout_preset_combo.currentIndex()
+        if idx < len(self.LAYOUT_PRESETS):
+            return [list(row) for row in self.LAYOUT_PRESETS[idx][1]]
+        # Custom - read the checkboxes
+        result: list[list[str]] = []
+        for row_checks in self._row_checkboxes:
+            row = [field for field, ck in row_checks.items() if ck.isChecked()]
+            if row:
+                result.append(row)
+        return result or [["name"]]
+
+    # -------------------------------------------------------- Weather tab
+    def _build_weather_tab(self, e: dict) -> QWidget:
+        w = QWidget()
+        layout = QVBoxLayout(w)
+
+        layout.addWidget(QLabel(
+            "Enable/disable weather via the Basics tab. This tab controls "
+            "what the weather line LOOKS like when it's shown."))
+
+        parts_box = QGroupBox("Show which parts")
+        parts_layout = QVBoxLayout(parts_box)
+        self.weather_show_emoji_check = QCheckBox("Weather icon (☀ 🌧 ⛅ etc.)")
+        self.weather_show_emoji_check.setChecked(e.get("weather_show_emoji", True))
+        self.weather_show_temp_check = QCheckBox("Temperature (e.g. 24°C)")
+        self.weather_show_temp_check.setChecked(e.get("weather_show_temp", True))
+        self.weather_show_label_check = QCheckBox(
+            "Condition label (e.g. \"Clear\", \"Rain\") — see custom names below")
+        self.weather_show_label_check.setChecked(e.get("weather_show_label", True))
+        for ck in (self.weather_show_emoji_check, self.weather_show_temp_check,
+                    self.weather_show_label_check):
+            parts_layout.addWidget(ck)
+        layout.addWidget(parts_box)
+
+        # Custom label mapping table - swap default condition names for
+        # your own preferred wording. Users can leave the "override" blank
+        # to keep the default.
+        rename_box = QGroupBox("Rename weather conditions")
+        rename_layout = QVBoxLayout(rename_box)
+        rename_layout.addWidget(QLabel(
+            "Replace the default names with anything you like — say "
+            "\"Sunny\" instead of \"Clear\", \"Wet\" instead of \"Rain\", etc. "
+            "Blank overrides keep the default name."))
+
+        # A small set of the most-used conditions (the full WMO list is
+        # long; users can drop through to the "Custom format" field below
+        # if they need finer control).
+        self._weather_label_overrides: list[tuple[str, QLineEdit]] = []
+        existing_map = e.get("weather_label_map") or {}
+        common = ["Clear", "Mostly clear", "Partly cloudy", "Overcast",
+                   "Fog", "Light rain", "Rain", "Heavy rain",
+                   "Light snow", "Snow", "Thunderstorm"]
+        form = QFormLayout()
+        for cond in common:
+            edit = QLineEdit()
+            edit.setPlaceholderText(cond)
+            if cond in existing_map:
+                edit.setText(existing_map[cond])
+            form.addRow(f"{cond}:", edit)
+            self._weather_label_overrides.append((cond, edit))
+        rename_layout.addLayout(form)
+        layout.addWidget(rename_box)
+
+        # Full custom format string for power users.
+        custom_box = QGroupBox("Custom format (advanced)")
+        custom_layout = QVBoxLayout(custom_box)
+        custom_layout.addWidget(QLabel(
+            "Override the whole weather line with a template. Placeholders:\n"
+            "  {emoji}  {temp}  {label}  {code}\n"
+            "Example: \"{emoji} it's {temp} and {label} outside\"\n"
+            "Leave blank to use the parts selected above."))
+        self.weather_custom_format_edit = QLineEdit(
+            e.get("weather_custom_format", ""))
+        self.weather_custom_format_edit.setPlaceholderText(
+            "Leave blank to use the default composition")
+        custom_layout.addWidget(self.weather_custom_format_edit)
+        layout.addWidget(custom_box)
 
         layout.addStretch()
         return w
@@ -382,6 +573,13 @@ class CityDialog(QDialog):
             self.tz_combo.setCurrentText(tz)
 
     def result_city(self) -> dict:
+        # Collect any non-blank weather label overrides.
+        label_map = {}
+        for cond, edit in self._weather_label_overrides:
+            override = edit.text().strip()
+            if override:
+                label_map[cond] = override
+
         result = {
             # basics
             "name": self.name_edit.text().strip() or "Unnamed",
@@ -402,6 +600,14 @@ class CityDialog(QDialog):
             "show_time": self.show_time_check.isChecked(),
             "show_weather": self.show_weather_check.isChecked(),
             "show_notes": self.show_notes_check.isChecked(),
+            # layout
+            "label_layout": self._current_layout(),
+            # weather formatting
+            "weather_show_emoji": self.weather_show_emoji_check.isChecked(),
+            "weather_show_temp": self.weather_show_temp_check.isChecked(),
+            "weather_show_label": self.weather_show_label_check.isChecked(),
+            "weather_label_map": label_map,
+            "weather_custom_format": self.weather_custom_format_edit.text().strip(),
             # notes
             "notes": self.notes_edit.toPlainText().strip(),
         }
