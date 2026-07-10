@@ -395,20 +395,32 @@ class MainWindow(QMainWindow):
         mode_box = QGroupBox("Multi-monitor mode")
         mode_form = QFormLayout(mode_box)
         self.monitors_mode_combo = QComboBox()
+        # A few Windows 11 users have seen the popup render at only one
+        # row when a QComboBox lives inside a QScrollArea (which every
+        # tab does now). Setting a generous max visible count + a real
+        # minimum contents length forces Qt to size the popup properly
+        # for all three items, on every platform theme.
+        self.monitors_mode_combo.setMaxVisibleItems(10)
+        self.monitors_mode_combo.setMinimumContentsLength(38)
+        # Give the combo an ItemView so the popup detaches cleanly from
+        # the scroll area's viewport - some styles otherwise inherit the
+        # viewport's clip region and hide rows.
+        from PySide6.QtWidgets import QListView
+        self.monitors_mode_combo.setView(QListView())
         self.monitors_mode_combo.addItem(
-            "Mirror – same map on every monitor", "mirror")
+            "Mirror  —  same map on every monitor", "mirror")
         self.monitors_mode_combo.addItem(
-            "Span – one wide map across all monitors", "span")
+            "Stretch  —  one map across all monitors", "span")
         self.monitors_mode_combo.addItem(
-            "Independent – each monitor has its own view", "independent")
+            "Custom per-monitor  —  each monitor its own view", "independent")
         self.monitors_mode_combo.currentIndexChanged.connect(self._on_settings_changed)
         mode_form.addRow("Mode:", self.monitors_mode_combo)
         self.monitors_mode_note = QLabel(
-            "Span composes one wide map across all monitors, filling any "
-            "gaps (diagonal layouts, zoom < 100%) with the void colour "
-            "below. Independent lets each monitor have its own zoom, "
-            "focal point, and void fill — pick which monitor to edit "
-            "from the selector that appears."
+            "Stretch composes one wide map across all monitors, filling "
+            "any gaps (diagonal layouts, zoom < 100%) with the void colour "
+            "below. Custom per-monitor lets each monitor have its own "
+            "zoom, focal point, and void fill — pick which monitor to "
+            "edit from the selector that appears."
         )
         self.monitors_mode_note.setWordWrap(True)
         self.monitors_mode_note.setStyleSheet("color:#888; font-size:11px;")
