@@ -311,11 +311,11 @@ class MainWindow(QMainWindow):
             "Cities shown as markers on the map, each with their current local time."
         ))
 
-        self.city_table = QTableWidget(0, 5)
+        self.city_table = QTableWidget(0, 6)
         self.city_table.setHorizontalHeaderLabels(
-            ["Name", "Local time", "Timezone", "Coordinates", "Colour"])
+            ["Name", "Local time", "Weather", "Timezone", "Coordinates", "Colour"])
         self.city_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.city_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.city_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
         self.city_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.city_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.city_table.itemDoubleClicked.connect(lambda _: self._on_edit_city())
@@ -506,18 +506,34 @@ class MainWindow(QMainWindow):
         except Exception:
             return "--:--"
 
+    def _city_weather_status(self, city: dict) -> str:
+        """Human-readable status for the Weather column of the cities table.
+        Distinguishes 'not enabled', 'loading', 'unavailable', and shows the
+        actual reading when we have one - so 'no weather appearing' isn't
+        indistinguishable from 'weather disabled'."""
+        if not city.get("show_weather"):
+            return "—"
+        from . import weather as weather_module
+        reading = weather_module.get_cached(city["lat"], city["lon"])
+        if reading is None:
+            return "loading…"
+        units = self.settings.get("temp_units", "C")
+        emoji = reading.emoji or ""
+        return f"{emoji} {reading.temp_display(units)}".strip()
+
     def _refresh_city_table(self) -> None:
         self.city_table.setRowCount(len(self.cities))
         for row, city in enumerate(self.cities):
             self.city_table.setItem(row, 0, QTableWidgetItem(city["name"]))
             self.city_table.setItem(row, 1, QTableWidgetItem(self._city_local_time(city)))
-            self.city_table.setItem(row, 2, QTableWidgetItem(city["tz"]))
+            self.city_table.setItem(row, 2, QTableWidgetItem(self._city_weather_status(city)))
+            self.city_table.setItem(row, 3, QTableWidgetItem(city["tz"]))
             coord_text = f"{city['lat']:.2f}, {city['lon']:.2f}"
-            self.city_table.setItem(row, 3, QTableWidgetItem(coord_text))
+            self.city_table.setItem(row, 4, QTableWidgetItem(coord_text))
             color_item = QTableWidgetItem("")
             color = city.get("color", [255, 210, 60])
             color_item.setBackground(QColor(*color))
-            self.city_table.setItem(row, 4, color_item)
+            self.city_table.setItem(row, 5, color_item)
 
     def _on_clock_tick(self) -> None:
         """Once a second: refresh the countdown label, and (only while the
@@ -534,11 +550,16 @@ class MainWindow(QMainWindow):
         for row, city in enumerate(self.cities):
             if row >= self.city_table.rowCount():
                 break
-            item = self.city_table.item(row, 1)
-            if item is not None:
+            time_item = self.city_table.item(row, 1)
+            if time_item is not None:
                 new_text = self._city_local_time(city)
-                if item.text() != new_text:
-                    item.setText(new_text)
+                if time_item.text() != new_text:
+                    time_item.setText(new_text)
+            weather_item = self.city_table.item(row, 2)
+            if weather_item is not None:
+                new_wtext = self._city_weather_status(city)
+                if weather_item.text() != new_wtext:
+                    weather_item.setText(new_wtext)
 
     def _on_add_city(self) -> None:
         dialog = CityDialog(self)

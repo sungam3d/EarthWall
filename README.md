@@ -1,4 +1,3 @@
-![EarthWall](assets/Icon/Transparent/convertico-icon-transparent_128x128.png)
 # EarthWall
 
 A live, real-time Earth wallpaper for Linux: flat equirectangular map,
@@ -8,29 +7,6 @@ now a proper desktop app to manage it all.
 
 Built as a Linux-native alternative to DeskSoft's EarthView, using real
 NASA Blue Marble / Black Marble imagery.
-
-## Screenshots
-
-### Desktop wallpaper examples
-
-![Full desktop screenshot 1](assets/screenshots/SS-01.png)
-![Full desktop screenshot 2](assets/screenshots/SS-02.png)
-![Full desktop screenshot 3](assets/screenshots/SS-03.png)
-![Full desktop screenshot 4](assets/screenshots/SS-04.png)
-
-### Application interface
-
-**General tab**
-
-![General tab](assets/screenshots/SS-General.jpg)
-
-**Map & Views tab**
-
-![Map & Views tab](assets/screenshots/SS-Map-Views.jpg)
-
-**Cities tab**
-
-![Cities tab](assets/screenshots/SS-Cities.jpg)
 
 ## What's in the GUI
 

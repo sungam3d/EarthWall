@@ -5,10 +5,12 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QCheckBox, QColorDialog, QComboBox, QCompleter, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-    QPlainTextEdit, QPushButton, QSlider, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
+    QPlainTextEdit, QPushButton, QScrollArea, QSlider, QSpinBox, QTabWidget,
+    QVBoxLayout, QWidget,
 )
 
 from .city_database import CITY_DATABASE, search_cities
+from . import fonts as fonts_module
 
 try:
     from zoneinfo import available_timezones
@@ -17,12 +19,98 @@ except Exception:
     ALL_TIMEZONES = []
 
 
+class _FieldStyleControls:
+    """Reusable widget cluster for one field's font family/style/size/colour.
+    Kept as a helper class so name/time/weather/notes can each get the same
+    controls without three hundred lines of duplication."""
+
+    def __init__(self, parent: QWidget, field_key: str, defaults: dict,
+                 existing: dict, on_change=None):
+        self.field_key = field_key
+        self._on_change = on_change
+        self._color = QColor(*existing.get(f"{field_key}_color",
+                                           defaults.get("color", [255, 255, 255])))
+
+        self.family_combo = QComboBox()
+        self.family_combo.addItems(fonts_module.list_families())
+        family = existing.get(f"{field_key}_font_family",
+                               defaults.get("family", fonts_module.DEFAULT_FAMILY))
+        idx = self.family_combo.findText(family)
+        if idx >= 0:
+            self.family_combo.setCurrentIndex(idx)
+        elif self.family_combo.count():
+            self.family_combo.setCurrentIndex(0)
+        self.family_combo.currentTextChanged.connect(self._refresh_styles)
+
+        self.style_combo = QComboBox()
+        self._refresh_styles()
+        current_style = existing.get(f"{field_key}_font_style",
+                                      defaults.get("style", "Regular"))
+        idx = self.style_combo.findText(current_style)
+        if idx >= 0:
+            self.style_combo.setCurrentIndex(idx)
+
+        self.scale_spin = QDoubleSpinBox()
+        self.scale_spin.setRange(0.5, 3.0)
+        self.scale_spin.setSingleStep(0.1)
+        self.scale_spin.setSuffix("×")
+        self.scale_spin.setValue(float(existing.get(f"{field_key}_font_scale",
+                                                     defaults.get("scale", 1.0))))
+
+        self.color_preview = QLabel()
+        self.color_preview.setFixedSize(28, 20)
+        self._update_color_preview()
+        self.color_btn = QPushButton("Choose…")
+        self.color_btn.clicked.connect(self._pick_color)
+
+    def _refresh_styles(self) -> None:
+        prev = self.style_combo.currentText() if self.style_combo.count() else "Regular"
+        self.style_combo.blockSignals(True)
+        self.style_combo.clear()
+        self.style_combo.addItems(fonts_module.available_styles(
+            self.family_combo.currentText()))
+        idx = self.style_combo.findText(prev)
+        if idx >= 0:
+            self.style_combo.setCurrentIndex(idx)
+        self.style_combo.blockSignals(False)
+
+    def _update_color_preview(self) -> None:
+        c = self._color
+        self.color_preview.setStyleSheet(
+            f"background-color: rgb({c.red()},{c.green()},{c.blue()});"
+            f" border: 1px solid #444; border-radius: 3px;")
+
+    def _pick_color(self) -> None:
+        color = QColorDialog.getColor(self._color, self.color_btn,
+                                        f"{self.field_key.title()} colour")
+        if color.isValid():
+            self._color = color
+            self._update_color_preview()
+
+    def add_to_form(self, form: QFormLayout, label_prefix: str) -> None:
+        color_row = QHBoxLayout()
+        color_row.addWidget(self.color_preview)
+        color_row.addWidget(self.color_btn)
+        color_row.addStretch()
+        form.addRow(f"{label_prefix} font:", self.family_combo)
+        form.addRow(f"{label_prefix} style:", self.style_combo)
+        form.addRow(f"{label_prefix} size:", self.scale_spin)
+        form.addRow(f"{label_prefix} colour:", color_row)
+
+    def to_dict(self) -> dict:
+        return {
+            f"{self.field_key}_font_family": self.family_combo.currentText(),
+            f"{self.field_key}_font_style": self.style_combo.currentText(),
+            f"{self.field_key}_font_scale": self.scale_spin.value(),
+            f"{self.field_key}_color": [self._color.red(), self._color.green(),
+                                         self._color.blue()],
+        }
+
+
 class CityDialog(QDialog):
-    """Add or edit a single city marker. Basics tab has the fields you need
-    99% of the time (name / location / timezone / colour); the other tabs
-    are for finer control: label placement, marker style, weather display,
-    and notes. Everything falls back to a sensible default when omitted,
-    so old configs keep working without changes."""
+    """Add or edit a single city marker. Split into tabs so the Basics tab
+    stays uncluttered (name / location / colour / what to show), while
+    Marker/Placement/Text/Notes get their own dedicated tabs."""
 
     MARKER_STYLES = [
         ("Dot (filled circle)", "dot"),
@@ -39,20 +127,32 @@ class CityDialog(QDialog):
         ("Auto (whichever fits)", "auto"),
     ]
 
+    # Sensible per-field styling defaults - name is bold and larger,
+    # time is regular, weather is regular, notes is smaller and italic.
+    _FIELD_DEFAULTS = {
+        "name": {"family": fonts_module.DEFAULT_FAMILY, "style": "Bold",
+                  "scale": 1.0, "color": [255, 255, 255]},
+        "time": {"family": fonts_module.DEFAULT_FAMILY, "style": "Regular",
+                  "scale": 1.0, "color": [255, 255, 255]},
+        "weather": {"family": fonts_module.DEFAULT_FAMILY, "style": "Regular",
+                     "scale": 0.9, "color": [180, 220, 255]},
+        "notes": {"family": fonts_module.DEFAULT_FAMILY, "style": "Italic",
+                    "scale": 0.85, "color": [200, 200, 200]},
+    }
+
     def __init__(self, parent=None, existing: dict | None = None):
         super().__init__(parent)
         self.setWindowTitle("Edit City" if existing else "Add City")
-        self.setMinimumWidth(460)
+        self.setMinimumWidth(500)
+        self.resize(520, 640)
         e = existing or {}
         self._marker_color = QColor(*e.get("color", [255, 210, 60]))
-        self._text_color = QColor(*e.get("text_color", [255, 255, 255]))
 
         layout = QVBoxLayout(self)
 
         search_label = QLabel(
-            "Search the built-in city list, or just fill in the Basics tab "
-            "manually for anywhere not listed:"
-        )
+            "Search the built-in city list, or fill in the Basics tab "
+            "manually for anywhere not listed:")
         search_label.setWordWrap(True)
         layout.addWidget(search_label)
 
@@ -67,8 +167,9 @@ class CityDialog(QDialog):
 
         tabs = QTabWidget()
         tabs.addTab(self._build_basics_tab(e), "Basics")
-        tabs.addTab(self._build_display_tab(e), "Display")
-        tabs.addTab(self._build_weather_tab(e), "Weather")
+        tabs.addTab(self._build_marker_tab(e), "Marker")
+        tabs.addTab(self._build_placement_tab(e), "Placement")
+        tabs.addTab(self._wrap_scrollable(self._build_text_tab(e)), "Text styling")
         tabs.addTab(self._build_notes_tab(e), "Notes")
         layout.addWidget(tabs)
 
@@ -77,11 +178,19 @@ class CityDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+    def _wrap_scrollable(self, widget: QWidget) -> QWidget:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setWidget(widget)
+        return scroll
+
     # -------------------------------------------------------- Basics tab
     def _build_basics_tab(self, e: dict) -> QWidget:
         w = QWidget()
-        form = QFormLayout(w)
+        layout = QVBoxLayout(w)
 
+        form = QFormLayout()
         self.name_edit = QLineEdit(e.get("name", ""))
         form.addRow("Display name:", self.name_edit)
 
@@ -113,16 +222,34 @@ class CityDialog(QDialog):
         color_row.addWidget(self.color_preview); color_row.addWidget(color_btn); color_row.addStretch()
         form.addRow("Marker colour:", color_row)
 
+        layout.addLayout(form)
+
+        # Single unified group for the four show/hide toggles - one setting
+        # per feature, so there's no way to accidentally have "fetch on but
+        # not displayed" or vice versa. This was the source of the "weather
+        # not loading" bug before this rewrite.
+        content_box = QGroupBox("What to show in the label")
+        content_layout = QVBoxLayout(content_box)
+        self.show_name_check = QCheckBox("City name")
+        self.show_name_check.setChecked(e.get("show_name", True))
+        self.show_time_check = QCheckBox("Local time")
+        self.show_time_check.setChecked(e.get("show_time", True))
+        self.show_weather_check = QCheckBox(
+            "Current weather (temperature + condition, from Open-Meteo)")
+        self.show_weather_check.setChecked(e.get("show_weather", False))
+        self.show_notes_check = QCheckBox("Notes (edit them in the Notes tab)")
+        self.show_notes_check.setChecked(e.get("show_notes", False))
+        for ck in [self.show_name_check, self.show_time_check,
+                    self.show_weather_check, self.show_notes_check]:
+            content_layout.addWidget(ck)
+        layout.addWidget(content_box)
+        layout.addStretch()
         return w
 
-    # -------------------------------------------------------- Display tab
-    def _build_display_tab(self, e: dict) -> QWidget:
+    # -------------------------------------------------------- Marker tab
+    def _build_marker_tab(self, e: dict) -> QWidget:
         w = QWidget()
-        layout = QVBoxLayout(w)
-
-        # --- Marker style ---
-        marker_box = QGroupBox("Marker")
-        marker_form = QFormLayout(marker_box)
+        form = QFormLayout(w)
 
         self.marker_style_combo = QComboBox()
         for label, value in self.MARKER_STYLES:
@@ -130,19 +257,23 @@ class CityDialog(QDialog):
         current_style = e.get("marker_style", "dot")
         idx = next((i for i, (_, v) in enumerate(self.MARKER_STYLES) if v == current_style), 0)
         self.marker_style_combo.setCurrentIndex(idx)
-        marker_form.addRow("Shape:", self.marker_style_combo)
+        form.addRow("Shape:", self.marker_style_combo)
 
         self.marker_size_spin = QDoubleSpinBox()
         self.marker_size_spin.setRange(0.4, 4.0); self.marker_size_spin.setSingleStep(0.1)
         self.marker_size_spin.setValue(float(e.get("marker_size", 1.0)))
         self.marker_size_spin.setSuffix("×")
-        marker_form.addRow("Size:", self.marker_size_spin)
+        form.addRow("Size:", self.marker_size_spin)
 
-        layout.addWidget(marker_box)
+        return w
 
-        # --- Label placement ---
-        label_box = QGroupBox("Label placement")
-        label_form = QFormLayout(label_box)
+    # -------------------------------------------------------- Placement tab
+    def _build_placement_tab(self, e: dict) -> QWidget:
+        w = QWidget()
+        layout = QVBoxLayout(w)
+
+        pos_box = QGroupBox("Label position relative to marker")
+        pos_form = QFormLayout(pos_box)
 
         self.label_side_combo = QComboBox()
         for label, value in self.LABEL_SIDES:
@@ -150,58 +281,24 @@ class CityDialog(QDialog):
         side = e.get("label_side", "right")
         side_idx = next((i for i, (_, v) in enumerate(self.LABEL_SIDES) if v == side), 0)
         self.label_side_combo.setCurrentIndex(side_idx)
-        label_form.addRow("Position:", self.label_side_combo)
+        pos_form.addRow("Side:", self.label_side_combo)
 
         self.offset_x_spin = QSpinBox()
         self.offset_x_spin.setRange(-500, 500); self.offset_x_spin.setSuffix(" px")
         self.offset_x_spin.setValue(int(e.get("label_offset_x", 0)))
         self.offset_x_spin.setToolTip("Extra horizontal nudge from the automatic position")
-        label_form.addRow("Nudge X:", self.offset_x_spin)
+        pos_form.addRow("Nudge X:", self.offset_x_spin)
 
         self.offset_y_spin = QSpinBox()
         self.offset_y_spin.setRange(-500, 500); self.offset_y_spin.setSuffix(" px")
         self.offset_y_spin.setValue(int(e.get("label_offset_y", 0)))
         self.offset_y_spin.setToolTip("Extra vertical nudge from the automatic position")
-        label_form.addRow("Nudge Y:", self.offset_y_spin)
+        pos_form.addRow("Nudge Y:", self.offset_y_spin)
 
-        self.label_scale_spin = QDoubleSpinBox()
-        self.label_scale_spin.setRange(0.5, 3.0); self.label_scale_spin.setSingleStep(0.1)
-        self.label_scale_spin.setValue(float(e.get("label_scale", 1.0)))
-        self.label_scale_spin.setSuffix("×")
-        label_form.addRow("Font size:", self.label_scale_spin)
+        layout.addWidget(pos_box)
 
-        layout.addWidget(label_box)
-
-        # --- Label contents & style ---
-        content_box = QGroupBox("What to show in the label")
-        content_layout = QVBoxLayout(content_box)
-        self.show_name_check = QCheckBox("City name")
-        self.show_name_check.setChecked(e.get("show_name", True))
-        self.show_time_check = QCheckBox("Local time")
-        self.show_time_check.setChecked(e.get("show_time", True))
-        self.show_weather_check = QCheckBox("Weather (see Weather tab to enable fetching)")
-        self.show_weather_check.setChecked(e.get("show_weather", False))
-        self.show_notes_check = QCheckBox("Notes (see Notes tab)")
-        self.show_notes_check.setChecked(e.get("show_notes", False))
-        for ck in [self.show_name_check, self.show_time_check,
-                    self.show_weather_check, self.show_notes_check]:
-            content_layout.addWidget(ck)
-        layout.addWidget(content_box)
-
-        # --- Colors & background ---
-        style_box = QGroupBox("Label style")
-        style_form = QFormLayout(style_box)
-
-        text_color_row = QHBoxLayout()
-        self.text_color_preview = QLabel(); self.text_color_preview.setFixedSize(28, 20)
-        self._update_text_color_preview()
-        text_color_btn = QPushButton("Choose…")
-        text_color_btn.clicked.connect(self._pick_text_color)
-        text_color_row.addWidget(self.text_color_preview)
-        text_color_row.addWidget(text_color_btn); text_color_row.addStretch()
-        style_form.addRow("Text colour:", text_color_row)
-
-        bg_row = QHBoxLayout()
+        bg_box = QGroupBox("Label background")
+        bg_layout = QHBoxLayout(bg_box)
         self.bg_alpha_slider = QSlider(Qt.Horizontal)
         self.bg_alpha_slider.setRange(0, 255)
         self.bg_alpha_slider.setValue(int(e.get("background_alpha", 165)))
@@ -209,49 +306,36 @@ class CityDialog(QDialog):
         self.bg_alpha_value.setMinimumWidth(32)
         self.bg_alpha_slider.valueChanged.connect(
             lambda v: self.bg_alpha_value.setText(str(v)))
-        bg_row.addWidget(QLabel("Transparent"))
-        bg_row.addWidget(self.bg_alpha_slider)
-        bg_row.addWidget(QLabel("Solid"))
-        bg_row.addWidget(self.bg_alpha_value)
-        style_form.addRow("Background:", bg_row)
+        bg_layout.addWidget(QLabel("Transparent"))
+        bg_layout.addWidget(self.bg_alpha_slider)
+        bg_layout.addWidget(QLabel("Solid"))
+        bg_layout.addWidget(self.bg_alpha_value)
+        layout.addWidget(bg_box)
 
-        layout.addWidget(style_box)
         layout.addStretch()
         return w
 
-    # -------------------------------------------------------- Weather tab
-    def _build_weather_tab(self, e: dict) -> QWidget:
+    # -------------------------------------------------------- Text styling tab
+    def _build_text_tab(self, e: dict) -> QWidget:
         w = QWidget()
         layout = QVBoxLayout(w)
 
-        info = QLabel(
-            "Weather is fetched from Open-Meteo (free, no account needed) "
-            "using the city's latitude/longitude, and cached per city for "
-            "15 minutes.\n\n"
-            "To actually see it on the map, also enable "
-            "\"Weather\" in the Display tab's \"What to show in the label\" section."
-        )
-        info.setWordWrap(True)
-        layout.addWidget(info)
+        intro = QLabel(
+            "Each part of the label can have its own font, style, size, "
+            "and colour. Size is a multiplier of the auto-sized base "
+            "font (which scales with your wallpaper resolution).")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
 
-        self.enable_weather_check = QCheckBox(
-            "Fetch weather for this city (uses ~1 API call every 15 minutes)")
-        self.enable_weather_check.setChecked(e.get("show_weather", False))
-        # Keep the two checkboxes in sync - enabling here also flips the
-        # display checkbox on, so a novice doesn't have to know it's a
-        # two-step process; they can uncheck the display one later if they
-        # want to fetch without displaying.
-        self.enable_weather_check.toggled.connect(self.show_weather_check.setChecked)
-        layout.addWidget(self.enable_weather_check)
-
-        note = QLabel(
-            "Note: this app doesn't use an API key, so weather may fail "
-            "silently if the free service is temporarily rate-limiting. "
-            "The last known good reading is kept in the meantime."
-        )
-        note.setWordWrap(True)
-        note.setStyleSheet("color:#888; font-size:11px;")
-        layout.addWidget(note)
+        self._field_controls: dict[str, _FieldStyleControls] = {}
+        for field, human_label in [("name", "Name"), ("time", "Time"),
+                                     ("weather", "Weather"), ("notes", "Notes")]:
+            box = QGroupBox(f"{human_label} text")
+            form = QFormLayout(box)
+            ctrl = _FieldStyleControls(w, field, self._FIELD_DEFAULTS[field], e)
+            ctrl.add_to_form(form, "")
+            self._field_controls[field] = ctrl
+            layout.addWidget(box)
 
         layout.addStretch()
         return w
@@ -262,18 +346,13 @@ class CityDialog(QDialog):
         layout = QVBoxLayout(w)
         layout.addWidget(QLabel(
             "Free text shown under the marker (e.g. \"Sarah's flat\", "
-            "\"office hours 9-5\"). Kept short - long notes are wrapped and "
-            "capped at a few lines so they don't dominate the map."))
+            "\"office hours 9-5\"). Notes are wrapped and capped at "
+            "3 lines so they don't dominate the map.\n\n"
+            "Enable/disable notes display via the Basics tab checkbox."))
         self.notes_edit = QPlainTextEdit()
         self.notes_edit.setPlainText(e.get("notes", ""))
         self.notes_edit.setPlaceholderText("Optional…")
         layout.addWidget(self.notes_edit)
-
-        self.show_notes_on_map_check = QCheckBox(
-            "Show these notes on the map (also toggleable in Display tab)")
-        self.show_notes_on_map_check.setChecked(e.get("show_notes", False))
-        self.show_notes_on_map_check.toggled.connect(self.show_notes_check.setChecked)
-        layout.addWidget(self.show_notes_on_map_check)
         return w
 
     # -------------------------------------------------------- helpers
@@ -283,23 +362,11 @@ class CityDialog(QDialog):
             f"background-color: rgb({c.red()},{c.green()},{c.blue()});"
             f" border: 1px solid #444; border-radius: 3px;")
 
-    def _update_text_color_preview(self) -> None:
-        c = self._text_color
-        self.text_color_preview.setStyleSheet(
-            f"background-color: rgb({c.red()},{c.green()},{c.blue()});"
-            f" border: 1px solid #444; border-radius: 3px;")
-
     def _pick_marker_color(self) -> None:
         color = QColorDialog.getColor(self._marker_color, self, "Marker colour")
         if color.isValid():
             self._marker_color = color
             self._update_marker_color_preview()
-
-    def _pick_text_color(self) -> None:
-        color = QColorDialog.getColor(self._text_color, self, "Text colour")
-        if color.isValid():
-            self._text_color = color
-            self._update_text_color_preview()
 
     def _on_pick_from_search(self, text: str) -> None:
         matches = [c for c in CITY_DATABASE if c[0] == text]
@@ -315,29 +382,30 @@ class CityDialog(QDialog):
             self.tz_combo.setCurrentText(tz)
 
     def result_city(self) -> dict:
-        return {
+        result = {
             # basics
             "name": self.name_edit.text().strip() or "Unnamed",
             "lat": self.lat_spin.value(),
             "lon": self.lon_spin.value(),
             "tz": self.tz_combo.currentText().strip() or "UTC",
             "color": [self._marker_color.red(), self._marker_color.green(), self._marker_color.blue()],
-            # marker style
+            # marker
             "marker_style": self.marker_style_combo.currentData(),
             "marker_size": self.marker_size_spin.value(),
-            # label placement
+            # placement
             "label_side": self.label_side_combo.currentData(),
             "label_offset_x": self.offset_x_spin.value(),
             "label_offset_y": self.offset_y_spin.value(),
-            "label_scale": self.label_scale_spin.value(),
-            # label contents
+            "background_alpha": self.bg_alpha_slider.value(),
+            # what to show
             "show_name": self.show_name_check.isChecked(),
             "show_time": self.show_time_check.isChecked(),
             "show_weather": self.show_weather_check.isChecked(),
             "show_notes": self.show_notes_check.isChecked(),
-            # label styling
-            "text_color": [self._text_color.red(), self._text_color.green(), self._text_color.blue()],
-            "background_alpha": self.bg_alpha_slider.value(),
             # notes
             "notes": self.notes_edit.toPlainText().strip(),
         }
+        # Merge in per-field font/style/size/color for each of name/time/weather/notes.
+        for ctrl in self._field_controls.values():
+            result.update(ctrl.to_dict())
+        return result

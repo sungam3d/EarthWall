@@ -91,6 +91,7 @@ def _fetch(lat: float, lon: float) -> WeatherReading | None:
                 "longitude": lon,
                 "current_weather": "true",
             },
+            headers={"User-Agent": "EarthWall/1.0 (Linux desktop wallpaper)"},
             timeout=FETCH_TIMEOUT,
         )
         resp.raise_for_status()
@@ -100,7 +101,14 @@ def _fetch(lat: float, lon: float) -> WeatherReading | None:
         label, emoji = _WMO_CODES.get(code, ("--", ""))
         return WeatherReading(temp_c=temp, code=code, label=label,
                                emoji=emoji, fetched_at=time.time())
-    except Exception:
+    except Exception as e:
+        # Print to stderr so users running from a terminal see WHY weather
+        # isn't loading. Prior to this, silent failure was the second half
+        # of the "weather not loading at all" problem: no reading appeared
+        # and no error either, leaving the user with no way to diagnose.
+        import sys
+        print(f"[earthwall] weather fetch failed for ({lat},{lon}): {e}",
+               file=sys.stderr)
         return None
 
 
@@ -116,10 +124,15 @@ def get_weather(lat: float, lon: float) -> WeatherReading | None:
         if cached is not None and (now - cached.fetched_at) < CACHE_MAX_AGE:
             return cached
 
-        # Cache stale/missing: try a refresh, unless we failed very recently.
+        # Cache stale/missing: try a refresh, unless we failed very recently
+        # AND we already have SOME cached reading to fall back on. Without
+        # the second half of that condition, a first-time enable would hit
+        # the backoff after the very first failure and never retry within
+        # the 2-minute window, making weather look "not loading" even
+        # though it's just waiting - a real bug reported by users.
         last = _last_attempt.get(key, 0.0)
-        if now - last < RETRY_BACKOFF:
-            return cached  # may be a stale reading; still better than nothing
+        if now - last < RETRY_BACKOFF and cached is not None:
+            return cached
 
         _last_attempt[key] = now
 
@@ -130,6 +143,14 @@ def get_weather(lat: float, lon: float) -> WeatherReading | None:
         if fresh is not None:
             _cache[key] = fresh
             return fresh
+        return _cache.get(key)
+
+
+def get_cached(lat: float, lon: float) -> WeatherReading | None:
+    """Non-blocking read: return whatever is in the cache right now, or None.
+    Used by the GUI to show status in tables without triggering a fetch."""
+    key = (round(lat, 2), round(lon, 2))
+    with _lock:
         return _cache.get(key)
 
 

@@ -165,53 +165,73 @@ def _lonlat_to_xy(lon: float, lat: float, width: int, height: int, center_lon: f
 
 
 def _load_font(size: int) -> ImageFont.FreeTypeFont:
-    candidates = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf",
-    ]
-    for path in candidates:
-        if Path(path).exists():
-            return ImageFont.truetype(path, size)
-    return ImageFont.load_default()
+    """Legacy default-font loader kept for backwards compatibility; prefer
+    fonts.resolve(family, style, size) for per-field font choices."""
+    from . import fonts as fonts_module
+    return fonts_module.resolve(fonts_module.DEFAULT_FAMILY, "Bold", size)
 
 
-def _build_label_lines(city: dict, now_utc: datetime,
-                        weather_reading, temp_units: str) -> list[str]:
-    """Compose the multi-line label text for a single city, respecting
-    per-city display flags (show_time / show_weather / show_notes / show_name)
-    with sensible defaults for older configs missing those fields."""
-    lines: list[str] = []
+def _field_style(city: dict, field: str, base_font_size: int,
+                  default_color: tuple) -> dict:
+    """Resolve per-field label styling. Each field (name/time/weather/notes)
+    can have its own font family, style, size multiplier, and colour.
+    Legacy configs without any per-field style keys fall back to the
+    label_scale + text_color values used before this feature."""
+    prefix = f"{field}_"
+    from . import fonts as fonts_module
+
+    family = city.get(f"{prefix}font_family",
+                       city.get("font_family", fonts_module.DEFAULT_FAMILY))
+    style = city.get(f"{prefix}font_style",
+                       city.get("font_style", "Bold"))
+    scale_default = float(city.get("label_scale", 1.0))
+    scale = float(city.get(f"{prefix}font_scale", scale_default))
+    color = city.get(f"{prefix}color", city.get("text_color", list(default_color)))
+
+    size = max(8, int(base_font_size * scale))
+    font = fonts_module.resolve(family, style, size)
+
+    return {
+        "font": font,
+        "font_size": size,
+        "color": tuple(color),
+    }
+
+
+def _build_label_segments(city: dict, now_utc: datetime,
+                            weather_reading, temp_units: str,
+                            base_font_size: int, default_color: tuple) -> list[dict]:
+    """Return a list of styled segments, one per label line. Each segment is
+    a dict {text, font, font_size, color}. Fields with show_* == False are
+    simply skipped."""
+    segments: list[dict] = []
 
     if city.get("show_name", True):
-        lines.append(city.get("name", "Unnamed"))
+        style = _field_style(city, "name", base_font_size, default_color)
+        style["text"] = city.get("name", "Unnamed")
+        segments.append(style)
 
     if city.get("show_time", True):
         try:
             local_time = now_utc.astimezone(ZoneInfo(city["tz"])).strftime("%H:%M")
         except Exception:
             local_time = "--:--"
-        # If the name is also being shown and time is short enough, keep
-        # them on the same line so simple markers stay compact.
-        if lines and len(lines[-1]) + len(local_time) + 2 < 22:
-            lines[-1] = f"{lines[-1]}  {local_time}"
-        else:
-            lines.append(local_time)
+        style = _field_style(city, "time", base_font_size, default_color)
+        style["text"] = local_time
+        segments.append(style)
 
     if city.get("show_weather", False) and weather_reading is not None:
         w_line = f"{weather_reading.emoji}  {weather_reading.temp_display(temp_units)}".strip()
         if weather_reading.label and weather_reading.label != "--":
             w_line = f"{w_line}  {weather_reading.label}"
-        lines.append(w_line)
+        style = _field_style(city, "weather", base_font_size, default_color)
+        style["text"] = w_line
+        segments.append(style)
 
     if city.get("show_notes", False):
         note = (city.get("notes") or "").strip()
         if note:
-            # Wrap manually at ~26 chars so overlong notes don't blow out
-            # the marker box width; a hard cap on total note lines keeps
-            # verbose notes from dominating the map.
+            note_style = _field_style(city, "notes", base_font_size, default_color)
             words = note.split()
             wrapped: list[str] = []
             current = ""
@@ -224,13 +244,17 @@ def _build_label_lines(city: dict, now_utc: datetime,
                     current = trial
             if current:
                 wrapped.append(current)
-            lines.extend(wrapped[:3])
+            for wrapped_line in wrapped[:3]:
+                seg = dict(note_style)  # copy so per-line dicts don't share
+                seg["text"] = wrapped_line
+                segments.append(seg)
 
-    if not lines:
-        # Never render a completely empty label - at minimum, the name.
-        lines.append(city.get("name", "Unnamed"))
+    if not segments:
+        style = _field_style(city, "name", base_font_size, default_color)
+        style["text"] = city.get("name", "Unnamed")
+        segments.append(style)
 
-    return lines
+    return segments
 
 
 def _draw_marker_shape(draw: ImageDraw.ImageDraw, x: int, y: int, r: int,
@@ -301,20 +325,21 @@ def _draw_city_markers(img: Image.Image, cities: list[dict], now_utc: datetime,
         _draw_marker_shape(draw, x, y, marker_r, color, marker_style)
 
         weather_reading = weather_by_city.get(i)
-        lines = _build_label_lines(city, now_utc, weather_reading, temp_units)
+        default_text_color = tuple(city.get("text_color", (255, 255, 255)))
+        segments = _build_label_segments(
+            city, now_utc, weather_reading, temp_units,
+            base_font_size, default_text_color,
+        )
 
-        # Per-city font scaling for emphasis on important cities.
-        font_size = max(9, int(base_font_size * float(city.get("label_scale", 1.0))))
-        font = _load_font(font_size)
-
-        # Measure the label as a block of stacked lines.
-        line_metrics = [draw.textbbox((0, 0), line, font=font) for line in lines]
+        # Measure the label as a block of stacked, per-segment styled lines.
+        line_metrics = [draw.textbbox((0, 0), seg["text"], font=seg["font"])
+                         for seg in segments]
         line_widths = [bbox[2] - bbox[0] for bbox in line_metrics]
         line_heights = [bbox[3] - bbox[1] for bbox in line_metrics]
         line_ybase = [bbox[1] for bbox in line_metrics]
         line_spacing = 3
         text_w = max(line_widths) if line_widths else 0
-        text_h = sum(line_heights) + line_spacing * max(0, len(lines) - 1)
+        text_h = sum(line_heights) + line_spacing * max(0, len(segments) - 1)
 
         pad_x, pad_y = 8, 5
         box_w = text_w + pad_x * 2
@@ -362,7 +387,6 @@ def _draw_city_markers(img: Image.Image, cities: list[dict], now_utc: datetime,
                     break
             if placed:
                 break
-        # If we ran out of slots, just place it at the base position.
 
         box = (label_x, label_y, label_x + box_w, label_y + box_h)
         placed_boxes.append(box)
@@ -371,12 +395,12 @@ def _draw_city_markers(img: Image.Image, cities: list[dict], now_utc: datetime,
         if bg_alpha > 0:
             draw.rounded_rectangle(list(box), radius=6, fill=(15, 15, 20, bg_alpha))
 
-        text_color = tuple(city.get("text_color", (255, 255, 255)))
-        # Draw lines top-down starting from padding.
+        # Draw each segment with its own font and colour.
         y_cursor = label_y + pad_y
-        for idx, line in enumerate(lines):
+        for idx, seg in enumerate(segments):
             draw.text((label_x + pad_x, y_cursor - line_ybase[idx]),
-                       line, font=font, fill=(*text_color, 255))
+                       seg["text"], font=seg["font"],
+                       fill=(*seg["color"], 255))
             y_cursor += line_heights[idx] + line_spacing
 
     return img
