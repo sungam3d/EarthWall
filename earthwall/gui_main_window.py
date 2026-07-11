@@ -70,6 +70,8 @@ class MainWindow(QMainWindow):
         self._worker: RenderWorker | None = None
         self._preview_worker: RenderWorker | None = None
         self._last_preview_pixmap: QPixmap | None = None
+        self._raw_map_thumb: QPixmap | None = None
+        self._raw_map_thumb_key: str | None = None
         self._initializing = True
 
         self.update_timer = QTimer(self)
@@ -651,8 +653,14 @@ class MainWindow(QMainWindow):
             ax = layout.virtual_x + (vw - aw) // 2
             ay = layout.virtual_y + (vh - ah) // 2
         self.screen_area_preview.set_map_area((ax, ay, aw, ah))
-        if self._last_preview_pixmap is not None:
-            self.screen_area_preview.set_map_thumbnail(self._last_preview_pixmap)
+        # Feed the RAW map image (plain equirectangular day map) as the
+        # red-box thumbnail - NOT the composited wallpaper render. The red
+        # box represents the whole map image, so it must be filled by the
+        # map alone; the composited render already has void padding / zoom
+        # baked in, which would wrongly show empty space inside the box.
+        self._ensure_raw_map_thumb()
+        if self._raw_map_thumb is not None:
+            self.screen_area_preview.set_map_thumbnail(self._raw_map_thumb)
 
     def _on_map_focal_changed(self, lon: float, lat: float) -> None:
         """Draggable red dot moved. In mirror/span the new focal updates
@@ -789,6 +797,35 @@ class MainWindow(QMainWindow):
             self._refresh_void_fill_swatch()
         finally:
             self._initializing = False
+
+    def _ensure_raw_map_thumb(self) -> None:
+        """Lazily load a small thumbnail of the RAW active day map (plain
+        equirectangular, no day/night, clouds, or void) for the Displays-
+        tab red-box preview. Cached and only reloaded when the selected
+        map changes, so it costs nothing on repeated preview refreshes."""
+        active = self.settings.get("map_set", "blue_marble_july")
+        if getattr(self, "_raw_map_thumb_key", None) == active \
+                and getattr(self, "_raw_map_thumb", None) is not None:
+            return
+        self._raw_map_thumb = None
+        self._raw_map_thumb_key = active
+        try:
+            from . import maps as maps_module
+            sets = maps_module.list_map_sets()
+            path = None
+            if active in sets:
+                path = str(sets[active]["day_path"])
+            elif sets:
+                path = str(next(iter(sets.values()))["day_path"])
+            if path:
+                pm = QPixmap(path)
+                if not pm.isNull():
+                    # Downscale for cheap repeated painting; the preview
+                    # is tiny so full map resolution is wasted here.
+                    self._raw_map_thumb = pm.scaledToWidth(
+                        640, Qt.SmoothTransformation)
+        except Exception:
+            self._raw_map_thumb = None
 
     def _refresh_void_fill_swatch(self) -> None:
         from .monitors import monitor_config_for
@@ -1357,11 +1394,14 @@ class MainWindow(QMainWindow):
         self._stop_spinner()
         self._last_preview_pixmap = QPixmap(output_path)
         self._rescale_preview()
-        # Also feed the miniature into the Displays-tab screen-area
-        # preview so it shows the current render inside the map-area
-        # rectangle instead of an empty red outline.
+        # The Displays-tab red box is filled from the RAW map thumbnail
+        # (see _ensure_raw_map_thumb), NOT this composited render - so we
+        # deliberately do not push _last_preview_pixmap into it here.
+        # Refresh the raw thumb in case the active map changed.
         if hasattr(self, "screen_area_preview"):
-            self.screen_area_preview.set_map_thumbnail(self._last_preview_pixmap)
+            self._ensure_raw_map_thumb()
+            if getattr(self, "_raw_map_thumb", None) is not None:
+                self.screen_area_preview.set_map_thumbnail(self._raw_map_thumb)
 
     def _rescale_preview(self) -> None:
         if self._last_preview_pixmap is None or self._last_preview_pixmap.isNull():

@@ -122,7 +122,6 @@ class ScreenAreaPreview(QWidget):
     def _paint(self, _event) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
-        # Widget background: solid dark, slightly rounded like EarthView.
         p.fillRect(self.rect(), _VIRTUAL_BG)
 
         if self._layout is None or not self._layout.monitors:
@@ -132,61 +131,76 @@ class ScreenAreaPreview(QWidget):
 
         s, ox, oy = self._fit_transform()
 
-        # 1. Paint each monitor as a filled rounded rect at its true
-        #    virtual-desktop position - diagonal layouts land correctly
-        #    because we translate by (virtual_x, virtual_y) in the offset.
-        for m in self._layout.monitors:
-            rx = m.x * s + ox
-            ry = m.y * s + oy
-            rw = m.width * s
-            rh = m.height * s
-            fill = _MONITOR_FILL_PRIMARY if m.is_primary else _MONITOR_FILL
-            p.setPen(QPen(_MONITOR_EDGE, 1))
-            p.setBrush(QBrush(fill))
-            p.drawRoundedRect(QRectF(rx, ry, rw, rh), 3, 3)
-            # Monitor number badge (top-left corner).
-            self._draw_badge(p, int(rx + 4), int(ry + 4), str(m.index + 1),
-                             QColor(90, 90, 100))
+        def to_widget(vx, vy, vw, vh):
+            return QRectF(vx * s + ox, vy * s + oy, vw * s, vh * s)
 
-        # 2. Paint the map thumbnail (if any) inside the map-area rect,
-        #    then draw the red outline over the top and a "1" view badge
-        #    in the corner - the visual signature EarthView uses.
-        #
-        #    The map rect is CLIPPED to the widget interior: when the map
-        #    is zoomed past 100% it's larger than the desktop and would
-        #    otherwise draw outside the widget (or, worse, force a rescale
-        #    that shrank the monitor). Clipping means the overflow simply
-        #    bleeds off the edge - the monitor rectangle keeps its size
-        #    and stays fully visible, with the map sitting over/behind it
-        #    just like on the real screen.
+        # Map-area rect in virtual-desktop coords -> widget coords. This
+        # is the FULL map image at (virtual_desktop * zoom); the red box
+        # always outlines the whole map and the thumbnail always fills it.
         area = self._map_area
         if area is None:
-            # Default: whole virtual desktop
             area = (self._layout.virtual_x, self._layout.virtual_y,
                     self._layout.virtual_width, self._layout.virtual_height)
-        ax, ay, aw, ah = area
-        rx = ax * s + ox
-        ry = ay * s + oy
-        rw = aw * s
-        rh = ah * s
-        map_rect = QRectF(rx, ry, rw, rh)
+        map_rect = to_widget(*area)
 
+        # Monitor rectangles in widget coords - these are the "windows"
+        # (masks) through which the map is seen at full brightness.
+        mon_rects = [to_widget(m.x, m.y, m.width, m.height)
+                     for m in self._layout.monitors]
+
+        # ---- Layer 1: the map OUTSIDE the screens, dimmed --------------
+        # Draw the whole map thumbnail (filling the entire red box) at
+        # reduced opacity across the widget, so wherever the map extends
+        # beyond the monitors you can still see it faintly. This is the
+        # "map behind the desktop" layer.
         p.save()
         p.setClipRect(self.rect())
         if self._map_thumb is not None and not self._map_thumb.isNull():
-            # Draw the thumbnail scaled to fill the map area (aspect not
-            # preserved - the real wallpaper stretches to fill too).
+            p.setOpacity(0.35)
             p.drawPixmap(map_rect.toRect(), self._map_thumb)
+            p.setOpacity(1.0)
+        p.restore()
 
+        # ---- Layer 2: the monitors (the mask) -------------------------
+        # Fill each monitor with the screen colour first (this is what
+        # shows through as "screen" wherever the map doesn't cover it,
+        # e.g. zoom < 100%), then punch the map back in at full
+        # brightness clipped to the monitor - so inside the screen you
+        # see the map crisply, exactly as it'll appear on the desktop.
+        for m, r in zip(self._layout.monitors, mon_rects):
+            fill = _MONITOR_FILL_PRIMARY if m.is_primary else _MONITOR_FILL
+            p.setPen(QPen(_MONITOR_EDGE, 1))
+            p.setBrush(QBrush(fill))
+            p.drawRoundedRect(r, 3, 3)
+
+        if self._map_thumb is not None and not self._map_thumb.isNull():
+            for r in mon_rects:
+                p.save()
+                p.setClipRect(r)
+                p.drawPixmap(map_rect.toRect(), self._map_thumb)
+                p.restore()
+
+        # Monitor number badges on top of the map slice.
+        for m, r in zip(self._layout.monitors, mon_rects):
+            self._draw_badge(p, int(r.x() + 4), int(r.y() + 4),
+                             str(m.index + 1), QColor(90, 90, 100))
+
+        # ---- Layer 3: the red outline of the full map -----------------
+        # Always drawn last so the whole map's extent is visible even
+        # where it spills past the monitors (zoom > 100%). Clipped to the
+        # widget so a huge zoomed-in map's outline doesn't draw miles off
+        # into negative space, but the edges that fall within the widget
+        # still show.
+        p.save()
+        p.setClipRect(self.rect())
         p.setBrush(Qt.NoBrush)
         p.setPen(QPen(_RED, 2))
         p.drawRect(map_rect)
         p.restore()
-        # Badge drawn unclipped so it's always readable even if the map's
-        # own corner is off-screen; pin it to the visible part of the map
-        # rect so it doesn't float away when zoomed in.
-        badge_x = int(max(self.rect().left() + 4, min(rx + 4, self.rect().right() - 24)))
-        badge_y = int(max(self.rect().top() + 4, min(ry + 4, self.rect().bottom() - 20)))
+        badge_x = int(max(self.rect().left() + 4,
+                          min(map_rect.x() + 4, self.rect().right() - 24)))
+        badge_y = int(max(self.rect().top() + 4,
+                          min(map_rect.y() + 4, self.rect().bottom() - 20)))
         self._draw_badge(p, badge_x, badge_y, "1", _BADGE_BG)
 
     def _draw_badge(self, p: QPainter, x: int, y: int, text: str,
