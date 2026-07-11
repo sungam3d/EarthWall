@@ -751,8 +751,14 @@ def render(output_path: str | Path, width: int, height: int,
     sub_lat, sub_lon = subsolar_point(when)
 
     has_layout = (monitor_layout is not None and monitor_layout.virtual_width > 0)
-    is_span = monitors_mode == "span" and has_layout
     is_independent = monitors_mode == "independent" and has_layout
+    # "span" covers both the explicit span mode AND mirror mode when a
+    # layout was supplied because the user set a zoom/offset the flat
+    # mirror render can't express. In that case we compose the single
+    # map onto the virtual-desktop canvas so zoom / map_pos_x / map_pos_y
+    # take effect (they're otherwise ignored by the flat render).
+    is_span = (has_layout and not is_independent
+               and monitors_mode in ("span", "mirror"))
 
     # ---- Independent mode: render each monitor separately ----
     if is_independent:

@@ -135,7 +135,20 @@ def main() -> None:
     tray.activated.connect(_on_tray_activated)
     tray.show()
 
-    window.show()
+    # Respect the "start hidden in tray" preference: when set, we skip the
+    # initial window.show() so the app boots quietly to the tray (typical
+    # for a login-time autostart). A one-off balloon message points the
+    # user at the tray icon so it isn't a mystery where the app went.
+    if window.settings.get("start_in_tray", False):
+        try:
+            tray.showMessage(
+                "EarthWall is running",
+                "EarthWall started in the tray. Click the icon to open settings.",
+                QSystemTrayIcon.MessageIcon.Information, 4000)
+        except Exception:
+            pass
+    else:
+        window.show()
     sys.exit(app.exec())
 
 

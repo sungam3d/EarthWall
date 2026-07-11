@@ -25,6 +25,7 @@ DEFAULTS = {
     "cloud_opacity": 0.35,
     "cloud_density": 1.0,   # 1.0 = raw satellite coverage; lower thins the field
     "night_view": True,     # False = full daylight map, no terminator/night side
+    "start_in_tray": False, # True = launch hidden in the system tray
     # --- Multi-monitor (Phase 2) ---
     # "mirror"      = same map image on every monitor (default, back-compat)
     # "span"        = one wide image stretched across all monitors as one

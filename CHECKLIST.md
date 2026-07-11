@@ -55,6 +55,34 @@
       to padding when a monitor's zoom < 100%; global void fill still applies
       to gaps between monitors in diagonal layouts. Verified end-to-end.
 
+## Phase 3 — GUI redesign (2026-07-11)
+- [x] **3.1 General tab: start-in-tray** — added "Start hidden in the system
+      tray" checkbox (sub-option under autostart). Setting start_in_tray;
+      gui.py skips window.show() when set and shows a tray balloon instead.
+- [x] **3.2 Clouds & Weather tab** — split live clouds, cloud opacity/density,
+      night side, and city-weather (temp units) out of General into their own
+      tab. Tab order: General, Map & View, Clouds & Weather, Displays, Cities.
+- [x] **3.3 Map & View: draggable dot replaces center slider** — moved the
+      MapFocalPointPreview (red-dot picker) from Displays to Map & View,
+      replacing the old longitude slider (dot does lon AND lat, strictly
+      better). Old slider/spinbox kept as hidden widgets for load/save compat;
+      preset buttons ("Americas/Atlantic/Asia/Pacific") now move the dot too.
+- [x] **3.4 Displays: taller screen area** — screen-area preview min height
+      220→340 with stretch, so a whole monitor stays visible when zoom < 100%
+      shrinks the map rect. Fixed inverted-zoom bug: map-area rect was
+      vw/zoom (grew when zooming out -> wide+short box); now vw*zoom (shrinks
+      when zooming out), matching the renderer.
+- [x] **3.5 CRITICAL: zoom/position now reach the desktop** — root cause:
+      _render_layout() returned None in mirror mode, and render() only
+      honoured zoom/pos in span/independent (both need a layout), so the
+      Displays zoom + X/Y controls updated the preview but were silently
+      dropped from the actual wallpaper render. Fix: _render_layout() now
+      returns a layout whenever zoom != 1.0 or map offset != 0 (even in
+      mirror mode), and render() treats "mirror + layout" as span (composes
+      the single map onto the virtual-desktop canvas honouring zoom/pos/void).
+      Default case (mirror, 100%, no offset) still returns None -> fast path.
+      Verified: mirror+zoom50 shows void border in the real render output.
+
 ## Reference notes
 - Bug repro: Update now → move cloud opacity → preview stretches; Update now fixes.
   Root cause confirmed in code (hardcoded 2:1 preview vs screen-aspect wallpaper).
@@ -73,3 +101,4 @@
 - Session 7 (2026-07-11): User reported the mode dropdown only showed "Mirror" on their Windows setup. Code had all 3 items - display bug. Applied belt-and-braces fix: setMaxVisibleItems(10), setMinimumContentsLength(38), and explicit QListView() as the popup view (avoids QScrollArea viewport clip inheritance on some Windows styles). Also renamed labels to clearer names the user actually expected: "Mirror", "Stretch", "Custom per-monitor" (data values unchanged - still "mirror"/"span"/"independent" on the wire). Version 1.0.13.
 - Session 8 (2026-07-11): CRASH FIX. App is Linux-only (Windows references in session 7 were a mistaken tangent - disregard). v1.0.13's crash-on-load was the bare QListView() set as the mode combo's popup view: PySide6 lets the Python wrapper be garbage-collected while Qt still holds the C++ pointer -> segfault under real xcb (invisible under offscreen platform, which is why earlier tests missed it). REMOVED the setView(QListView()) call; the setMaxVisibleItems(10) + setMinimumContentsLength(38) setters fix the one-row-popup display bug on their own. Added a global crash logger (gui.py _install_crash_logger): sys.excepthook writes full tracebacks to ~/.config/earthwall/earthwall_crash.log + shows a QMessageBox, so future crashes are diagnosable instead of silent. Hardened detect_layout() against zero-size/phantom screens (common mid-"Extend displays" toggle) and null primaryScreen. Wrapped both display-widget paintEvents in try/except (a raised exception in paintEvent can hard-crash Qt). Verified the full load + popup + extended-desktop + per-monitor-edit + focal-drag + repaint path under REAL xcb (xvfb + libxcb-cursor0) with zero crashes and empty crash log. Version 1.0.14.
   NOTE for future sessions: wallpaper.py is Linux-DE only (gnome/kde/cinnamon/xfce/mate/sway/feh) - no Windows/macOS paths, and that's correct/intended.
+- Session 9 (2026-07-11): Phase 3 GUI redesign complete (see Phase 3 section). Biggest win: fixed the long-standing bug where Displays-tab zoom/X/Y never affected the actual desktop (only the preview) - _render_layout() now engages the placement render path for any non-default zoom/offset, and render() treats mirror+layout as span. Also split Clouds & Weather into its own tab, moved the draggable focal dot to Map & View (replacing the longitude slider), added start-in-tray option, made the Displays screen-area preview taller, and fixed the inverted-zoom bug that made it wide+short below 100%. Version 1.0.15. Verified end-to-end under real xcb.

@@ -181,6 +181,7 @@ class MainWindow(QMainWindow):
         # worst case a scrollbar appears instead.
         tabs.addTab(self._make_scrollable(self._build_general_tab()), "General")
         tabs.addTab(self._make_scrollable(self._build_map_tab()), "Map && View")
+        tabs.addTab(self._make_scrollable(self._build_clouds_weather_tab()), "Clouds && Weather")
         tabs.addTab(self._make_scrollable(self._build_displays_tab()), "Displays")
         tabs.addTab(self._make_scrollable(self._build_cities_tab()), "Cities")
         root.addWidget(tabs, stretch=1)
@@ -221,6 +222,26 @@ class MainWindow(QMainWindow):
         self.autostart_check = QCheckBox("Start automatically when I log in")
         self.autostart_check.toggled.connect(self._on_autostart_toggled)
         layout.addWidget(self.autostart_check)
+
+        # When autostarting (or launching normally) the window would pop
+        # up on screen. This lets it boot straight to the system tray
+        # instead - handy for a login-time start where you just want the
+        # wallpaper updating quietly in the background. Indented slightly
+        # to read as a sub-option of the autostart checkbox above.
+        self.start_in_tray_check = QCheckBox(
+            "Start hidden in the system tray (don't show the window)")
+        self.start_in_tray_check.setStyleSheet("margin-left: 20px;")
+        self.start_in_tray_check.toggled.connect(self._on_settings_changed)
+        layout.addWidget(self.start_in_tray_check)
+
+        layout.addStretch()
+        return w
+
+    def _build_clouds_weather_tab(self) -> QWidget:
+        """Clouds, night side, and city-weather display - split out of the
+        General tab so each tab stays focused on one area of settings."""
+        w = QWidget()
+        layout = QVBoxLayout(w)
 
         clouds_box = QGroupBox("Live clouds")
         clouds_layout = QVBoxLayout(clouds_box)
@@ -299,31 +320,60 @@ class MainWindow(QMainWindow):
         map_btn_row.addStretch()
         layout.addLayout(map_btn_row)
 
-        center_box = QGroupBox("Map center position")
+        # Map center: a draggable red-dot picker (moved here from the
+        # Displays tab). Dragging the dot sets which lon/lat sits at the
+        # middle of the map - the same job the old longitude slider did,
+        # but two-dimensional and direct. The preset buttons remain as
+        # quick jumps. The slider/spinbox still exist as hidden widgets
+        # so the rest of the code (and settings load/save) keeps working
+        # unchanged; the dot and the spinbox stay mirrored.
+        from .gui_display_widgets import MapFocalPointPreview
+        from . import maps as maps_module
+
+        center_box = QGroupBox("Map center — drag the red dot")
         center_layout = QVBoxLayout(center_box)
         center_layout.addWidget(QLabel(
-            "Shift which longitude sits in the middle of the map "
-            "(0° = Prime Meridian/Africa-Europe centered, the default)."
+            "Drag the dot to choose the point at the centre of your map. "
+            "Left/right shifts longitude; up/down shifts latitude."
         ))
-        slider_row = QHBoxLayout()
+
+        map_thumb_path = None
+        try:
+            sets = maps_module.list_map_sets()
+            active = self.settings.get("map_set", "blue_marble_july")
+            if active in sets:
+                map_thumb_path = str(sets[active]["day_path"])
+            elif sets:
+                map_thumb_path = str(next(iter(sets.values()))["day_path"])
+        except Exception:
+            map_thumb_path = None
+
+        self.map_focal_preview = MapFocalPointPreview(map_path=map_thumb_path)
+        self.map_focal_preview.focal_changed.connect(self._on_map_focal_changed)
+        center_layout.addWidget(self.map_focal_preview)
+
+        # Hidden longitude slider/spinbox - kept for compatibility with
+        # existing load/save and the preset buttons; not shown in the UI
+        # now that the dot supersedes it.
         self.center_lon_slider = ClickJumpSlider(Qt.Horizontal)
         self.center_lon_slider.setRange(-180, 180)
         self.center_lon_spin = QSpinBox()
         self.center_lon_spin.setRange(-180, 180)
         self.center_lon_spin.setSuffix("°")
+        self.center_lon_slider.setVisible(False)
+        self.center_lon_spin.setVisible(False)
         self.center_lon_slider.valueChanged.connect(self.center_lon_spin.setValue)
         self.center_lon_spin.valueChanged.connect(self.center_lon_slider.setValue)
         self.center_lon_spin.valueChanged.connect(self._on_settings_changed)
-        slider_row.addWidget(self.center_lon_slider)
-        slider_row.addWidget(self.center_lon_spin)
-        center_layout.addLayout(slider_row)
 
         presets_row = QHBoxLayout()
-        for label, lon in [("Americas", -90), ("Atlantic (default)", 0),
+        presets_row.addWidget(QLabel("Jump to:"))
+        for label, lon in [("Americas", -90), ("Atlantic", 0),
                             ("Asia", 100), ("Pacific / Australia", 150)]:
             btn = QPushButton(label)
-            btn.clicked.connect(lambda _, v=lon: self.center_lon_spin.setValue(v))
+            btn.clicked.connect(lambda _, v=lon: self._jump_center_lon(v))
             presets_row.addWidget(btn)
+        presets_row.addStretch()
         center_layout.addLayout(presets_row)
 
         layout.addWidget(center_box)
@@ -371,22 +421,17 @@ class MainWindow(QMainWindow):
     def _build_displays_tab(self) -> QWidget:
         """The multi-monitor / display placement editor.
 
-        UI mirrors EarthView's wallpaper editor:
-          - Mode selector (Mirror / Span / Independent)
+        UI (the draggable Map Area dot now lives on the Map & View tab):
+          - Multi-monitor mode selector (Mirror / Stretch / Custom)
           - List of detected displays with a Refresh button
           - Large Screen Area preview (virtual desktop + monitors + red-
-            outlined map area)
-          - Small Map Area preview with a draggable red focal-point dot
-            that updates the map center longitude/latitude in real time
+            outlined map-area rectangle)
+          - Map placement controls: zoom, position spinboxes, void fill
 
-        Placement/zoom controls store values under the monitor_configs
-        schema in settings; the renderer honours them once Phase 2.6
-        lands. Until then the app still runs in the legacy "mirror" mode
-        (single map stretched to primary monitor) which is what it did
-        before, so nothing breaks for existing users."""
-        from .gui_display_widgets import ScreenAreaPreview, MapFocalPointPreview
-        from .monitors import detect_layout
-        from . import maps as maps_module
+        Placement values are stored under the monitor_configs schema and
+        honoured by the renderer (single map placed/scaled on the
+        virtual desktop, or per-monitor in Custom mode)."""
+        from .gui_display_widgets import ScreenAreaPreview
 
         w = QWidget()
         outer = QVBoxLayout(w)
@@ -458,33 +503,23 @@ class MainWindow(QMainWindow):
         outer.addWidget(self.monitor_editor_row)
 
         # ----- Screen Area preview -----
+        # Taller now that the Map Area dot moved to the Map & View tab -
+        # a squat preview couldn't show a whole monitor once zoom < 100%
+        # shrank the map rect inside it. The extra height lets the full
+        # virtual-desktop rectangle (and any void border) stay visible.
         screen_box = QGroupBox("Screen Area (your desktop)")
         screen_layout = QVBoxLayout(screen_box)
         self.screen_area_preview = ScreenAreaPreview()
-        self.screen_area_preview.setMinimumHeight(220)
+        self.screen_area_preview.setMinimumHeight(340)
         screen_layout.addWidget(self.screen_area_preview)
-        outer.addWidget(screen_box)
+        outer.addWidget(screen_box, stretch=1)
 
-        # ----- Map Area (focal point + zoom) -----
-        map_area_box = QGroupBox("Map Area (drag the red dot to change center)")
+        # ----- Map placement (zoom / position / void fill) -----
+        # The draggable focal dot lives on the Map & View tab now; this
+        # box keeps the placement controls that are specific to fitting
+        # the map onto the (multi-)monitor desktop.
+        map_area_box = QGroupBox("Map placement on desktop")
         map_area_layout = QVBoxLayout(map_area_box)
-
-        # Load a base map thumbnail so the focal-picker shows real coastlines
-        # instead of a blue rect - makes the dot's target far easier to see.
-        map_thumb_path = None
-        try:
-            sets = maps_module.list_map_sets()
-            active = self.settings.get("map_set", "blue_marble_july")
-            if active in sets:
-                map_thumb_path = str(sets[active]["day_path"])
-            elif sets:
-                map_thumb_path = str(next(iter(sets.values()))["day_path"])
-        except Exception:
-            map_thumb_path = None
-
-        self.map_focal_preview = MapFocalPointPreview(map_path=map_thumb_path)
-        self.map_focal_preview.focal_changed.connect(self._on_map_focal_changed)
-        map_area_layout.addWidget(self.map_focal_preview)
 
         zoom_row = QHBoxLayout()
         zoom_row.addWidget(QLabel("Zoom:"))
@@ -587,25 +622,33 @@ class MainWindow(QMainWindow):
 
     def _update_screen_area_preview(self) -> None:
         """Recompute the red-outlined map-area rect from current settings
-        and push it into the preview. Map area = virtual desktop scaled
-        by 1/zoom, centred on the focal point (for a first cut - proper
-        per-monitor placement lands with Phase 2.6)."""
+        and push it into the preview.
+
+        The map-area rectangle must match what the renderer actually does:
+        map_size = virtual_desktop * zoom. So zoom > 1 makes the map
+        LARGER than the desktop (it spills off the edges, no void); zoom
+        < 1 makes it SMALLER (void appears around it). An earlier version
+        divided by zoom instead of multiplying, which inverted this - at
+        50% the red box grew to twice desktop width, producing the very
+        wide, short rectangle that didn't fit the monitor."""
         layout = getattr(self, "_current_layout", None)
         if layout is None:
             return
+        idx = self._active_monitor_index()
+        cfg = (self.settings.get("monitor_configs") or {}).get(str(idx), {})
         zoom = self.map_zoom_slider.value() / 100.0
-        # At zoom=1 the map exactly covers the virtual desktop; at zoom>1
-        # it's larger than the desktop (parts spill off, no void); at
-        # zoom<1 it's smaller (void appears around it).
         vw, vh = layout.virtual_width, layout.virtual_height
-        aw = int(vw / max(0.01, zoom))
-        ah = int(vh / max(0.01, zoom))
-        # Centre on the focal point: translate so the focal lon/lat lands
-        # in the middle of the primary monitor for now (proper world-to-
-        # desktop mapping is Phase 2.6).
-        pm = layout.primary()
-        ax = pm.x + pm.width // 2 - aw // 2
-        ay = pm.y + pm.height // 2 - ah // 2
+        aw = max(1, int(round(vw * zoom)))
+        ah = max(1, int(round(vh * zoom)))
+        # Honour explicit position spinboxes when set, else auto-centre on
+        # the virtual desktop (matching the renderer's placement logic).
+        pos_x = int(cfg.get("map_pos_x", 0))
+        pos_y = int(cfg.get("map_pos_y", 0))
+        if pos_x != 0 or pos_y != 0:
+            ax, ay = pos_x, pos_y
+        else:
+            ax = layout.virtual_x + (vw - aw) // 2
+            ay = layout.virtual_y + (vh - ah) // 2
         self.screen_area_preview.set_map_area((ax, ay, aw, ah))
         if self._last_preview_pixmap is not None:
             self.screen_area_preview.set_map_thumbnail(self._last_preview_pixmap)
@@ -818,6 +861,11 @@ class MainWindow(QMainWindow):
         self.autostart_check.setChecked(autostart.is_enabled())
         self.autostart_check.blockSignals(False)
 
+        if hasattr(self, "start_in_tray_check"):
+            self.start_in_tray_check.blockSignals(True)
+            self.start_in_tray_check.setChecked(bool(s.get("start_in_tray", False)))
+            self.start_in_tray_check.blockSignals(False)
+
         self.clouds_check.blockSignals(True)
         self.clouds_check.setChecked(s["live_clouds"])
         self.clouds_check.blockSignals(False)
@@ -902,13 +950,26 @@ class MainWindow(QMainWindow):
 
     def _render_layout(self):
         """The MonitorLayout the render workers should honour, or None
-        for pure mirror mode (skips the whole multi-monitor code path
-        and keeps the classic single-image render fast for users on one
-        monitor with mirror mode)."""
+        for the classic single-image render.
+
+        Returns a layout (thus engaging the placement-aware render path)
+        whenever EITHER the user is in span/independent multi-monitor
+        mode, OR they've set a non-default zoom or map offset that the
+        plain mirror render can't express. This is what makes the
+        Displays-tab zoom / X / Y controls actually change the wallpaper
+        on a single-monitor setup: without a layout, render() falls back
+        to 'stretch map to fill' and silently ignores zoom and position.
+        When everything is default (mirror, 100% zoom, no offset) we
+        still return None so the common case keeps the fast path."""
         mode = self.settings.get("monitors_mode", "mirror")
-        if mode == "mirror":
-            return None
-        return getattr(self, "_current_layout", None)
+        layout = getattr(self, "_current_layout", None)
+        if mode in ("span", "independent"):
+            return layout
+        cfg = (self.settings.get("monitor_configs") or {}).get("0", {})
+        if cfg.get("zoom", 1.0) != 1.0 or cfg.get("map_pos_x", 0) != 0 \
+                or cfg.get("map_pos_y", 0) != 0:
+            return layout
+        return None
 
     def _on_settings_changed(self, *_args) -> None:
         if self._initializing:
@@ -923,6 +984,8 @@ class MainWindow(QMainWindow):
         self.settings["cloud_density"] = self.cloud_density_slider.value() / 100
         self.cloud_density_value_label.setText(f"{self.cloud_density_slider.value()}%")
         self.settings["night_view"] = self.night_view_check.isChecked()
+        if hasattr(self, "start_in_tray_check"):
+            self.settings["start_in_tray"] = self.start_in_tray_check.isChecked()
         # --- Multi-monitor / Displays tab ---
         if hasattr(self, "monitors_mode_combo"):
             new_mode = self.monitors_mode_combo.currentData() or "mirror"
@@ -1223,6 +1286,18 @@ class MainWindow(QMainWindow):
             self._worker.wait(5000)
         if self._preview_worker is not None and self._preview_worker.isRunning():
             self._preview_worker.wait(5000)
+
+    def _jump_center_lon(self, lon: int) -> None:
+        """Preset button: set the map centre longitude and keep the
+        draggable dot in sync. Latitude is left where it is (presets are
+        longitude-only 'jump to this region' shortcuts)."""
+        self.center_lon_spin.setValue(lon)
+        if hasattr(self, "map_focal_preview"):
+            _, cur_lat = self.map_focal_preview.focal()
+            self.map_focal_preview.set_focal(float(lon), cur_lat)
+        self.settings["center_lon"] = float(lon)
+        settings_module.save_settings(self.settings)
+        self._schedule_preview_update()
 
     def _preview_render_size(self) -> tuple[int, int]:
         """Preview render dimensions: fixed small width, height matching the
