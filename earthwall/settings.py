@@ -31,6 +31,10 @@ DEFAULTS = {
     "earthquake_min_mag": 4.5,     # only show quakes at/above this magnitude
     "earthquake_period": "week",   # hour | day | week | month
     "show_hurricanes": False,      # active tropical cyclones from NOAA NHC
+    # How often (minutes) to pull FRESH hazard data from USGS/NOAA.
+    # Between scans the overlay is drawn from the saved cache, so wallpaper
+    # updates don't re-download every time. Default 30 min.
+    "hazard_scan_minutes": 30,
     # Display customisation for the hazard overlays (keys match
     # render.DEFAULT_HAZARD_STYLE; only the ones the GUI exposes are set).
     "hazard_style": {

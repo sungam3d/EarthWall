@@ -127,6 +127,11 @@ NASA Blue Marble / Black Marble imagery.
   colour), and size. Earthquakes can optionally **print the magnitude
   number** next to each marker, with your own text colour and size.
   Hurricane name labels and forecast tracks can each be toggled on/off.
+- **Adjustable refresh rate** — set how often (1 min – 24 h) EarthWall
+  pulls fresh earthquake/hurricane data. Between scans the overlay is
+  drawn from a saved local cache rather than re-downloading, so leaving
+  a hazard enabled doesn't hit the network on every wallpaper refresh —
+  the cached data file is only updated when the interval elapses.
 
 ### City markers
 

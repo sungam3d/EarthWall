@@ -37,6 +37,27 @@ class RenderWorker(QThread):
         # is unsupported on some platforms.
         self.monitor_layout = monitor_layout
 
+    def _pos_fraction(self, key: str, axis: str) -> float:
+        """Convert a stored pixel map offset into a fraction of the
+        virtual-desktop dimension on the given axis. Uses the layout the
+        render will actually target so the fraction is correct; falls
+        back to the render's own width/height when no layout is set.
+
+        Storing the offset in pixels (nice for the UI) but rendering it
+        as a fraction is what keeps the same offset looking identical in
+        the low-res preview and the full-res wallpaper - a raw pixel
+        count would shift by the wrong amount at preview scale."""
+        px = (self.settings.get("monitor_configs", {})
+              .get("0", {}).get(key, 0))
+        if not px:
+            return 0.0
+        if self.monitor_layout is not None:
+            ref = (self.monitor_layout.virtual_width if axis == "x"
+                   else self.monitor_layout.virtual_height)
+        else:
+            ref = self.width if axis == "x" else self.height
+        return px / max(1, ref)
+
     def _gather_weather(self) -> dict:
         """Fetch weather for any city with show_weather set. Uses the
         weather module's per-city cache + backoff, so this is very cheap
@@ -65,9 +86,11 @@ class RenderWorker(QThread):
             if self.settings.get("show_earthquakes"):
                 try:
                     from . import hazards as hazards_module
+                    scan_min = self.settings.get("hazard_scan_minutes", 30)
                     earthquakes = hazards_module.get_earthquakes(
                         self.settings.get("earthquake_min_mag", 4.5),
                         self.settings.get("earthquake_period", "week"),
+                        ttl=max(1, int(scan_min)) * 60,
                     )
                 except Exception:
                     earthquakes = None
@@ -75,7 +98,9 @@ class RenderWorker(QThread):
             if self.settings.get("show_hurricanes"):
                 try:
                     from . import hazards as hazards_module
-                    hurricanes = hazards_module.get_hurricanes()
+                    scan_min = self.settings.get("hazard_scan_minutes", 30)
+                    hurricanes = hazards_module.get_hurricanes(
+                        ttl=max(1, int(scan_min)) * 60)
                     # Attach track geometry for any storm that offers it.
                     for storm in hurricanes or []:
                         turl = storm.get("track_url")
@@ -106,10 +131,12 @@ class RenderWorker(QThread):
                 monitor_layout=self.monitor_layout,
                 map_zoom=(self.settings.get("monitor_configs", {})
                           .get("0", {}).get("zoom", 1.0)),
-                map_pos_x=(self.settings.get("monitor_configs", {})
-                           .get("0", {}).get("map_pos_x", 0)),
-                map_pos_y=(self.settings.get("monitor_configs", {})
-                           .get("0", {}).get("map_pos_y", 0)),
+                # Convert the stored PIXEL offset into a fraction of the
+                # virtual desktop, so the offset renders identically at
+                # preview and full resolution. Reference size is the
+                # layout we're rendering onto (its virtual dimensions).
+                map_pos_x=self._pos_fraction("map_pos_x", axis="x"),
+                map_pos_y=self._pos_fraction("map_pos_y", axis="y"),
                 void_fill_color=(self.settings.get("monitor_configs", {})
                                  .get("0", {}).get("void_fill_color", "#000000")),
                 void_fill_image=(self.settings.get("monitor_configs", {})

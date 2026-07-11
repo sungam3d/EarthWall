@@ -1015,9 +1015,14 @@ def render(output_path: str | Path, width: int, height: int,
         virtual_h = monitor_layout.virtual_height
         map_w = max(1, int(round(virtual_w * map_zoom)))
         map_h = max(1, int(round(virtual_h * map_zoom)))
+        # map_pos_x / map_pos_y are FRACTIONS of the virtual desktop
+        # (-1.0..1.0), not absolute pixels, so the same offset produces
+        # the same visual result at preview resolution and at full
+        # wallpaper resolution. The GUI converts its pixel spinboxes to
+        # fractions (relative to the primary monitor) before saving.
         if map_pos_x != 0 or map_pos_y != 0:
-            map_x = map_pos_x
-            map_y = map_pos_y
+            map_x = int(round(map_pos_x * virtual_w))
+            map_y = int(round(map_pos_y * virtual_h))
         else:
             map_x = (virtual_w - map_w) // 2
             map_y = (virtual_h - map_h) // 2 + int(round(center_lat / 90.0 * map_h / 2))

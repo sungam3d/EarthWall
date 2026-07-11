@@ -291,6 +291,20 @@ class MainWindow(QMainWindow):
         hazards_box = QGroupBox("Natural hazards (live data)")
         hazards_layout = QVBoxLayout(hazards_box)
 
+        # How often to pull fresh data (applies to both overlays). Between
+        # scans the last saved data is reused, so enabling a hazard doesn't
+        # hammer the network on every wallpaper refresh.
+        scan_row = QHBoxLayout()
+        scan_row.addWidget(QLabel("Check for new data every:"))
+        self.hazard_scan_spin = QSpinBox()
+        self.hazard_scan_spin.setRange(1, 1440)   # 1 min .. 24 h
+        self.hazard_scan_spin.setSuffix(" min")
+        self.hazard_scan_spin.valueChanged.connect(self._on_settings_changed)
+        scan_row.addWidget(self.hazard_scan_spin)
+        scan_row.addWidget(QLabel("(reused from cache in between, to save data)"))
+        scan_row.addStretch()
+        hazards_layout.addLayout(scan_row)
+
         # Earthquakes
         self.earthquakes_check = QCheckBox(
             "Show earthquakes on the map (USGS, updates every few minutes)")
@@ -784,12 +798,18 @@ class MainWindow(QMainWindow):
         vw, vh = layout.virtual_width, layout.virtual_height
         aw = max(1, int(round(vw * zoom)))
         ah = max(1, int(round(vh * zoom)))
-        # Honour explicit position spinboxes when set, else auto-centre on
-        # the virtual desktop (matching the renderer's placement logic).
-        pos_x = int(cfg.get("map_pos_x", 0))
-        pos_y = int(cfg.get("map_pos_y", 0))
-        if pos_x != 0 or pos_y != 0:
-            ax, ay = pos_x, pos_y
+        # Position spinboxes hold PIXELS relative to the render
+        # resolution; the renderer treats them as a fraction of the
+        # virtual desktop. Mirror that here so the red box in this
+        # preview lands exactly where the wallpaper will: convert the
+        # pixel value to a fraction against the render resolution, then
+        # back to this preview layout's pixel space.
+        pos_x_px = int(cfg.get("map_pos_x", 0))
+        pos_y_px = int(cfg.get("map_pos_y", 0))
+        if pos_x_px != 0 or pos_y_px != 0:
+            ref_w, ref_h = self._current_resolution()
+            ax = layout.virtual_x + int(round(pos_x_px / max(1, ref_w) * vw))
+            ay = layout.virtual_y + int(round(pos_y_px / max(1, ref_h) * vh))
         else:
             ax = layout.virtual_x + (vw - aw) // 2
             ay = layout.virtual_y + (vh - ah) // 2
@@ -1174,6 +1194,9 @@ class MainWindow(QMainWindow):
             self.hurricanes_check.blockSignals(True)
             self.hurricanes_check.setChecked(bool(s.get("show_hurricanes", False)))
             self.hurricanes_check.blockSignals(False)
+            self.hazard_scan_spin.blockSignals(True)
+            self.hazard_scan_spin.setValue(int(s.get("hazard_scan_minutes", 30)))
+            self.hazard_scan_spin.blockSignals(False)
             self._load_hazard_style_widgets()
 
         # --- Multi-monitor / Displays tab ---
@@ -1261,7 +1284,19 @@ class MainWindow(QMainWindow):
         cfg = (self.settings.get("monitor_configs") or {}).get("0", {})
         if cfg.get("zoom", 1.0) != 1.0 or cfg.get("map_pos_x", 0) != 0 \
                 or cfg.get("map_pos_y", 0) != 0:
-            return layout
+            # Mirror mode with a zoom/offset: the placement math in
+            # render() composes the map onto a virtual-desktop-sized
+            # canvas. That canvas MUST match the actual render resolution
+            # (what _current_resolution reports), not the detected
+            # physical-monitor size - otherwise the void bar lands at the
+            # wrong scale, or (if the numbers differ) the wallpaper comes
+            # out the wrong dimensions entirely. So synthesise a single-
+            # monitor layout at exactly the render resolution.
+            from .monitors import MonitorLayout, Monitor
+            rw, rh = self._current_resolution()
+            return MonitorLayout(
+                [Monitor(0, "render", 0, 0, rw, rh, is_primary=True)],
+                0, 0, rw, rh)
         return None
 
     def _on_settings_changed(self, *_args) -> None:
@@ -1282,6 +1317,7 @@ class MainWindow(QMainWindow):
             self.settings["earthquake_period"] = \
                 self.earthquake_period_combo.currentData() or "week"
             self.settings["show_hurricanes"] = self.hurricanes_check.isChecked()
+            self.settings["hazard_scan_minutes"] = int(self.hazard_scan_spin.value())
         if hasattr(self, "start_in_tray_check"):
             self.settings["start_in_tray"] = self.start_in_tray_check.isChecked()
         # --- Multi-monitor / Displays tab ---

@@ -84,12 +84,13 @@ def _cache_file(key: str) -> Path:
     return CACHE_DIR / f"quakes_{safe}.json"
 
 
-def _load_eq_cache(key: str) -> list | None:
+def _load_eq_cache(key: str, ttl: float | None = None) -> list | None:
     path = _cache_file(key)
+    eff_ttl = _EQ_TTL if ttl is None else ttl
     try:
         if not path.exists():
             return None
-        if time.time() - path.stat().st_mtime > _EQ_TTL:
+        if time.time() - path.stat().st_mtime > eff_ttl:
             return None
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -146,9 +147,16 @@ def _parse_features(features: list, min_mag: float) -> list:
 
 
 def get_earthquakes(min_magnitude: float, period: str,
-                    force: bool = False) -> list:
+                    force: bool = False, ttl: float | None = None) -> list:
     """Return a list of earthquake dicts for the given minimum magnitude
     and time window ('hour'|'day'|'week'|'month').
+
+    `ttl` (seconds) controls how long cached data is reused before a
+    fresh network fetch - pass the user's chosen scan interval here. When
+    None, falls back to the module default. Between scans the data is
+    served from the on-disk cache file, so nothing is re-downloaded and
+    resources are saved; only after `ttl` elapses does the cache file get
+    refreshed from the network.
 
     Cheap and safe to call from a render thread: served from cache when
     fresh, network fetch otherwise, empty list on any failure. Never
@@ -156,15 +164,16 @@ def get_earthquakes(min_magnitude: float, period: str,
     period = period if period in _SUMMARY_PERIODS else "day"
     min_magnitude = max(0.0, float(min_magnitude))
     key = f"{min_magnitude:.1f}_{period}"
+    eff_ttl = _EQ_TTL if ttl is None else max(0.0, float(ttl))
 
     with _eq_lock:
         # In-memory fresh?
         cached = _eq_cache.get(key)
         now = time.time()
-        if cached and not force and now - cached[0] < _EQ_TTL:
+        if cached and not force and now - cached[0] < eff_ttl:
             return cached[1]
         # Disk fresh?
-        disk = _load_eq_cache(key) if not force else None
+        disk = _load_eq_cache(key, eff_ttl) if not force else None
         if disk is not None:
             _eq_cache[key] = (now, disk)
             return disk
@@ -225,12 +234,13 @@ def _hur_cache_file() -> Path:
     return CACHE_DIR / "hurricanes.json"
 
 
-def _load_hur_cache() -> list | None:
+def _load_hur_cache(ttl: float | None = None) -> list | None:
     path = _hur_cache_file()
+    eff_ttl = _HUR_TTL if ttl is None else ttl
     try:
         if not path.exists():
             return None
-        if time.time() - path.stat().st_mtime > _HUR_TTL:
+        if time.time() - path.stat().st_mtime > eff_ttl:
             return None
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -370,15 +380,20 @@ def _find_track_url(storm: dict) -> str | None:
     return None
 
 
-def get_hurricanes(force: bool = False) -> list:
+def get_hurricanes(force: bool = False, ttl: float | None = None) -> list:
     """Return a list of active tropical cyclone dicts. Cheap/safe from a
-    render thread; empty list on any failure; never raises."""
+    render thread; empty list on any failure; never raises.
+
+    `ttl` (seconds) sets how long cached storm data is reused before a
+    fresh fetch - pass the user's scan interval. Between scans data comes
+    from the on-disk cache, saving repeated downloads."""
     global _hur_cache, _hur_last_attempt
+    eff_ttl = _HUR_TTL if ttl is None else max(0.0, float(ttl))
     with _hur_lock:
         now = time.time()
-        if _hur_cache and not force and now - _hur_cache[0] < _HUR_TTL:
+        if _hur_cache and not force and now - _hur_cache[0] < eff_ttl:
             return _hur_cache[1]
-        disk = _load_hur_cache() if not force else None
+        disk = _load_hur_cache(eff_ttl) if not force else None
         if disk is not None:
             _hur_cache = (now, disk)
             return disk
