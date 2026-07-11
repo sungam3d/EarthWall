@@ -62,6 +62,27 @@ def _run(cmd: list[str]) -> bool:
         return False
 
 
+def _kde_set_fillmode() -> None:
+    """Force KDE Plasma's wallpaper FillMode to Stretch (0), so an image
+    is shown at exact pixel dimensions. Without this, KDE's default
+    "Scale and Crop" would chop out any void bar we deliberately added
+    via a map_pos offset. Silent on failure - purely a display polish."""
+    script = '''
+    var allDesktops = desktops();
+    for (i = 0; i < allDesktops.length; i++) {
+        d = allDesktops[i];
+        d.wallpaperPlugin = "org.kde.image";
+        d.currentConfigGroup = ["Wallpaper", "org.kde.image", "General"];
+        d.writeConfig("FillMode", 0);
+    }
+    '''
+    for qdbus_bin in ("qdbus6", "qdbus", "qdbus-qt6"):
+        if shutil.which(qdbus_bin):
+            _run([qdbus_bin, "org.kde.plasmashell", "/PlasmaShell",
+                  "org.kde.PlasmaShell.evaluateScript", script])
+            return
+
+
 def set_wallpaper(image_path: str | Path, desktop: str | None = None,
                     spanned: bool = False) -> bool:
     """Apply `image_path` as the desktop wallpaper.
@@ -84,21 +105,24 @@ def set_wallpaper(image_path: str | Path, desktop: str | None = None,
         # GNOME 42+ also has a separate dark-mode wallpaper key.
         _run(["gsettings", "set", "org.gnome.desktop.background",
               "picture-uri-dark", uri])
-        # In span mode the image is already sized to the whole virtual
-        # desktop, so we ask GNOME to stretch it across all monitors as
-        # one surface instead of tiling / centring per monitor.
-        # "spanned" is a stock picture-options value since GNOME 3.
-        if spanned:
-            _run(["gsettings", "set", "org.gnome.desktop.background",
-                  "picture-options", "spanned"])
+        # We always set picture-options ourselves so the image is
+        # displayed 1:1 unscaled. Without this, GNOME's default "zoom"
+        # crops the image to fill (chopping off any void bar the user
+        # added by shifting the map with map_pos_x/y), or "wallpaper"
+        # tiles it, so a deliberate offset would never be visible on the
+        # desktop. "spanned" for the multi-monitor case, "stretched"
+        # (which shows the image at its exact pixel dimensions when the
+        # image matches the screen size, as ours always does) for the
+        # single-monitor/mirror case.
+        _run(["gsettings", "set", "org.gnome.desktop.background",
+              "picture-options", "spanned" if spanned else "stretched"])
         return ok
 
     if desktop == "cinnamon":
         ok = _run(["gsettings", "set", "org.cinnamon.desktop.background",
                    "picture-uri", uri])
-        if spanned:
-            _run(["gsettings", "set", "org.cinnamon.desktop.background",
-                  "picture-options", "spanned"])
+        _run(["gsettings", "set", "org.cinnamon.desktop.background",
+              "picture-options", "spanned" if spanned else "stretched"])
         return ok
 
     if desktop == "kde":
@@ -107,7 +131,12 @@ def set_wallpaper(image_path: str | Path, desktop: str | None = None,
         # is named qdbus6 on some distros (e.g. Arch-based) and qdbus on
         # others, so try both.
         if shutil.which("plasma-apply-wallpaperimage"):
-            return _run(["plasma-apply-wallpaperimage", image_path])
+            ok = _run(["plasma-apply-wallpaperimage", image_path])
+            # As with GNOME below, force stretch/exact-pixel FillMode so
+            # any void bar from a map_pos offset is visible instead of
+            # being cropped by KDE's default "scale and crop".
+            _kde_set_fillmode()
+            return ok
         script = f'''
         var allDesktops = desktops();
         for (i = 0; i < allDesktops.length; i++) {{
@@ -115,6 +144,7 @@ def set_wallpaper(image_path: str | Path, desktop: str | None = None,
             d.wallpaperPlugin = "org.kde.image";
             d.currentConfigGroup = ["Wallpaper", "org.kde.image", "General"];
             d.writeConfig("Image", "file://{image_path}");
+            d.writeConfig("FillMode", 0);   // 0 = Stretch (1:1 pixel-exact)
         }}
         '''
         for qdbus_bin in ("qdbus6", "qdbus", "qdbus-qt6"):
@@ -137,39 +167,44 @@ def set_wallpaper(image_path: str | Path, desktop: str | None = None,
         for prop in props:
             ok &= _run(["xfconf-query", "-c", "xfce4-desktop", "-p", prop,
                         "-s", image_path])
+        # image-style 3 = Stretched (1:1 pixels shown as-is); default 5
+        # (Zoomed) would crop out any void bar from a map_pos offset.
+        style_props = [p.replace("last-image", "image-style") for p in props]
+        for prop in style_props:
+            _run(["xfconf-query", "-c", "xfce4-desktop", "-p", prop,
+                  "-s", "3"])
         return ok
 
     if desktop == "mate":
         ok = _run(["gsettings", "set", "org.mate.background",
                    "picture-filename", image_path])
-        if spanned:
-            _run(["gsettings", "set", "org.mate.background",
-                  "picture-options", "spanned"])
+        # Same reason as GNOME above: set picture-options so the image
+        # renders 1:1 and any void bar (from a map_pos offset) is shown.
+        _run(["gsettings", "set", "org.mate.background",
+              "picture-options", "spanned" if spanned else "stretched"])
         return ok
 
     if desktop == "sway":
         if shutil.which("swaybg"):
             subprocess.Popen(["pkill", "swaybg"])
-            # `fit` shows the spanned image at true 1:1 across the whole
-            # output; `fill` would crop. Only relevant when spanned=True,
-            # but swaybg has no dedicated span mode - it applies to each
-            # output separately. Users on Wayland WMs with true spanning
-            # (Hyprland, river) will need to configure their compositor.
-            mode = "fit" if spanned else "fill"
-            subprocess.Popen(["swaybg", "-i", image_path, "-m", mode])
+            # `stretch` displays the image at exact pixel dimensions,
+            # preserving any void bar. `fill` and `fit` would scale/crop
+            # and lose a deliberate offset. `stretch` is right for both
+            # the spanned and single-output cases because our render is
+            # already sized to the target surface.
+            subprocess.Popen(["swaybg", "-i", image_path, "-m", "stretch"])
             return True
         return False
 
     # Generic X11 fallback - works on most lightweight WMs (i3, bspwm, etc).
     if shutil.which("feh"):
-        # feh's --bg-fill scales-and-crops per-monitor by default; --bg-max
-        # scales to fit within each monitor. For a spanned image we want
-        # neither - --no-xinerama treats all outputs as one big screen so
-        # the image gets applied end-to-end across monitors.
+        # --bg-scale displays the image at the screen's exact size,
+        # preserving any void bar we added. --bg-fill would crop it.
+        # --no-xinerama treats all outputs as one canvas for spanned mode.
         cmd = ["feh"]
         if spanned:
             cmd.append("--no-xinerama")
-        cmd += ["--bg-fill", image_path]
+        cmd += ["--bg-scale", image_path]
         return _run(cmd)
 
     return False
