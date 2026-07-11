@@ -22,7 +22,7 @@ class RenderWorker(QThread):
 
     def __init__(self, settings: dict, cities: list[dict], output_path: str,
                  width: int, height: int, apply_wallpaper: bool = True,
-                 monitor_layout=None):
+                 monitor_layout=None, is_preview: bool = False):
         super().__init__()
         self.settings = settings
         self.cities = cities
@@ -30,6 +30,10 @@ class RenderWorker(QThread):
         self.width = width
         self.height = height
         self.apply_wallpaper = apply_wallpaper
+        # True for the in-app live preview; enables the monitor-overlay
+        # visual so users can see which parts of the composed map will
+        # land on which physical screen in multi-monitor modes.
+        self.is_preview = is_preview
         # Optional MonitorLayout snapshot. When present the render honours
         # monitors_mode / zoom / focal / void fill; when None the render
         # runs in classic single-image mode. Layout is captured on the
@@ -145,6 +149,7 @@ class RenderWorker(QThread):
                 earthquakes=earthquakes,
                 hurricanes=hurricanes,
                 hazard_style=self.settings.get("hazard_style"),
+                preview_show_monitor_overlay=self.is_preview,
             )
 
             if self.apply_wallpaper:

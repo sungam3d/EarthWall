@@ -603,16 +603,14 @@ class MainWindow(QMainWindow):
         mode_box = QGroupBox("Multi-monitor mode")
         mode_form = QFormLayout(mode_box)
         self.monitors_mode_combo = QComboBox()
-        # A few Windows 11 users have seen the popup render at only one
-        # row when a QComboBox lives inside a QScrollArea (which every
-        # tab does now). Setting a generous max visible count + a real
-        # minimum contents length forces Qt to size the popup properly
-        # for all three items, on every platform theme. (An earlier fix
-        # here also swapped in a bare QListView as the popup view, but
-        # that risked the view being garbage-collected on PySide6 - the
-        # two setters below are sufficient on their own.)
-        self.monitors_mode_combo.setMaxVisibleItems(10)
-        self.monitors_mode_combo.setMinimumContentsLength(38)
+        # The popup used to render at one row (or, on some Linux themes,
+        # zero rows -> unclickable) when the combo lived inside a
+        # QScrollArea. AdjustToContents is the standard, cross-platform
+        # fix: Qt sizes the popup to fit the actual items on demand,
+        # without the fragile explicit-width hack that previously broke
+        # the popup on certain Linux window managers.
+        self.monitors_mode_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToContents)
         self.monitors_mode_combo.addItem(
             "Mirror  —  same map on every monitor", "mirror")
         self.monitors_mode_combo.addItem(
@@ -1594,6 +1592,7 @@ class MainWindow(QMainWindow):
             dict(self.settings), list(self.cities), str(PREVIEW_OUTPUT),
             pw, ph, apply_wallpaper=False,
             monitor_layout=self._render_layout(),
+            is_preview=True,
         )
         self._preview_worker.finished_ok.connect(self._on_preview_render_done)
         self._preview_worker.finished_err.connect(self._on_render_error)

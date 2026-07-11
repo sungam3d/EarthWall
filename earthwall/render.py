@@ -901,6 +901,18 @@ def _render_monitor_view(monitor, monitor_config: dict, global_center_lon: float
     m_lon = monitor_config.get("center_lon", global_center_lon)
     m_lat = monitor_config.get("center_lat", global_center_lat)
     mw, mh = monitor.width, monitor.height
+    # Per-monitor position offset (from that monitor's map_pos_x/y
+    # spinboxes). Stored in the config as PIXELS relative to the real
+    # monitor size; here we convert to a fraction of THIS render's size
+    # so it works at both preview and full resolution. If the caller
+    # passed a _ScaledMonitor proxy, mw/mh are already the preview-scaled
+    # dimensions; the fraction stays correct because we divide by the
+    # same reference the pixel value was entered against (the real
+    # monitor size, stored on the underlying Monitor).
+    real_w = getattr(monitor, "_m", monitor).width
+    real_h = getattr(monitor, "_m", monitor).height
+    pos_x_frac = monitor_config.get("map_pos_x", 0) / max(1, real_w)
+    pos_y_frac = monitor_config.get("map_pos_y", 0) / max(1, real_h)
     render_w = max(1, int(round(mw * zoom)))
     render_h = max(1, int(round(mh * zoom)))
 
@@ -910,27 +922,75 @@ def _render_monitor_view(monitor, monitor_config: dict, global_center_lon: float
                              night_view, temp_units, weather_by_city,
                              earthquakes, hurricanes, hazard_style)
 
+    # Offset in pixels for this render's canvas.
+    off_x = int(round(pos_x_frac * mw))
+    off_y = int(round(pos_y_frac * mh))
+
     if zoom > 1.0:
         # Centre-crop to monitor size; latitude focal shifts the crop
-        # window vertically so different rows of the world can be shown.
-        crop_x = (render_w - mw) // 2
-        crop_y = (render_h - mh) // 2 - int(round(m_lat / 90.0 * (render_h - mh) / 2))
+        # window vertically, and the position offset shifts it further.
+        crop_x = (render_w - mw) // 2 - off_x
+        crop_y = (render_h - mh) // 2 - int(round(m_lat / 90.0 * (render_h - mh) / 2)) - off_y
         crop_x = max(0, min(render_w - mw, crop_x))
         crop_y = max(0, min(render_h - mh, crop_y))
         img = img.crop((crop_x, crop_y, crop_x + mw, crop_y + mh))
     elif zoom < 1.0:
-        # Pad to monitor size with the monitor's void fill so shrinking
-        # the map doesn't stretch it - matches what a user expects when
-        # setting a per-monitor zoom < 100% for a "small globe on wide
-        # empty desktop" look.
+        # Pad to monitor size with the monitor's void fill; the offset
+        # shifts the pasted map, so an offset > 0 leaves void on the
+        # opposite side (map_pos_y=100 → 100px void bar at the top).
         void = _load_void_fill(monitor_config.get("void_fill_color", "#000000"),
                                  monitor_config.get("void_fill_image"),
                                  (mw, mh))
-        paste_x = (mw - render_w) // 2
-        paste_y = (mh - render_h) // 2 + int(round(m_lat / 90.0 * (mh - render_h) / 2))
+        paste_x = (mw - render_w) // 2 + off_x
+        paste_y = (mh - render_h) // 2 + int(round(m_lat / 90.0 * (mh - render_h) / 2)) + off_y
         void.paste(img, (paste_x, paste_y))
         img = void
+    elif off_x != 0 or off_y != 0:
+        # Zoom == 1.0 with an offset: the map is monitor-sized and we
+        # shift it by (off_x, off_y), void-filling whatever's exposed.
+        void = _load_void_fill(monitor_config.get("void_fill_color", "#000000"),
+                                 monitor_config.get("void_fill_image"),
+                                 (mw, mh))
+        void.paste(img, (off_x, off_y))
+        img = void
     return img
+
+
+def _apply_monitor_overlay(img: Image.Image, layout, out_w: int, out_h: int) -> Image.Image:
+    """Dim any part of `img` that doesn't overlap a physical monitor, and
+    outline each monitor with a subtle border. Used only for the in-app
+    preview so the user can see, in one glance, which parts of the map
+    will land on which screen - and where mismatched-monitor gaps leave
+    map content off-screen. Purely visual, never applied to the real
+    wallpaper output."""
+    scale_x = out_w / max(1, layout.virtual_width)
+    scale_y = out_h / max(1, layout.virtual_height)
+
+    # 1. Build a mask that is opaque (255) inside every monitor and 0
+    #    everywhere else. Anywhere the mask is 0 will be dimmed.
+    mask = Image.new("L", (out_w, out_h), 0)
+    mdraw = ImageDraw.Draw(mask)
+    rects = []
+    for m in layout.monitors:
+        lx = int(round((m.x - layout.virtual_x) * scale_x))
+        ly = int(round((m.y - layout.virtual_y) * scale_y))
+        rw = max(1, int(round(m.width * scale_x)))
+        rh = max(1, int(round(m.height * scale_y)))
+        rects.append((lx, ly, lx + rw, ly + rh))
+        mdraw.rectangle([lx, ly, lx + rw - 1, ly + rh - 1], fill=255)
+
+    # 2. Build a darkened copy of the image. Compose original + dark
+    #    version using the mask so monitor areas stay bright.
+    darkened = Image.eval(img.convert("RGB"), lambda v: v // 3)
+    composited = Image.composite(img.convert("RGB"), darkened, mask)
+
+    # 3. Draw a soft outline around every monitor so the user can see the
+    #    boundaries even where the underlying map is dark.
+    d = ImageDraw.Draw(composited)
+    for lx, ly, rx, ry in rects:
+        d.rectangle([lx, ly, rx - 1, ry - 1],
+                    outline=(255, 255, 255), width=max(1, out_w // 900))
+    return composited
 
 
 class _ScaledMonitor:
@@ -977,7 +1037,15 @@ def render(output_path: str | Path, width: int, height: int,
            # --- Hazard overlays ---
            earthquakes: list | None = None,
            hurricanes: list | None = None,
-           hazard_style: dict | None = None) -> None:
+           hazard_style: dict | None = None,
+           # When True (only used for the in-app preview), dim any part
+           # of the composed image that doesn't land on a physical
+           # monitor, and outline each monitor - so the preview reads as
+           # "this is what will actually appear on my screens" instead
+           # of showing the full compose canvas as if it were one flat
+           # display. Only meaningful in span/independent mode with a
+           # layout.
+           preview_show_monitor_overlay: bool = False) -> None:
     """Render one wallpaper frame and save it to `output_path`.
 
     Modes:
@@ -1066,6 +1134,14 @@ def render(output_path: str | Path, width: int, height: int,
             cloud_density, night_view, temp_units, weather_by_city,
             earthquakes, hurricanes, hazard_style,
         )
+
+    # Preview-only overlay: dim off-monitor areas and outline monitors so
+    # the preview shows exactly which parts of the composed image will
+    # actually land on a physical screen.
+    if preview_show_monitor_overlay and monitor_layout is not None \
+            and (is_span or is_independent):
+        composite = _apply_monitor_overlay(composite, monitor_layout,
+                                            width, height)
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
