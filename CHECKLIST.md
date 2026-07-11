@@ -132,3 +132,23 @@
 - Session 9 (2026-07-11): Phase 3 GUI redesign complete (see Phase 3 section). Biggest win: fixed the long-standing bug where Displays-tab zoom/X/Y never affected the actual desktop (only the preview) - _render_layout() now engages the placement render path for any non-default zoom/offset, and render() treats mirror+layout as span. Also split Clouds & Weather into its own tab, moved the draggable focal dot to Map & View (replacing the longitude slider), added start-in-tray option, made the Displays screen-area preview taller, and fixed the inverted-zoom bug that made it wide+short below 100%. Version 1.0.15. Verified end-to-end under real xcb.
 - Session 10 (2026-07-11): Phase 4 (see section). Fixed screen-area zoom so the monitor rect never resizes (only the map scales, clipped to widget) - the wide+short breakage below 100% is gone. Added LabeledSlider (slider + synced number box) and rolled it out to cloud opacity/density, twilight, night darkness, and zoom; added X/Y number boxes for the map-center dot. Refreshed README with all Phase 2-4 features. Code review: pyflakes clean, removed dead imports/locals. Version 1.0.16. Verified end-to-end under real xcb.
 - Session 11 (2026-07-11): Fixed screen-area zoom mask model. User's correct mental model: grey box = monitor (a mask/viewport), red box = the WHOLE map image (always fully outlined, thumbnail always fills it entirely). Map drawn BEHIND the screen; inside the monitor you see the map at full brightness, outside you see it dimmed (0.35) plus the red outline. Two bugs fixed: (1) was feeding the COMPOSITED render (void baked in) as the red-box thumbnail so 50% zoom showed empty space inside the box - now feeds the RAW equirectangular day-map thumbnail (_ensure_raw_map_thumb, cached per map_set) which always fills the red box; (2) rewrote _paint into 3 layers: dimmed full map across widget, then monitors (screen-colour fill + full-bright map clipped to each monitor as a mask), then red outline of whole map on top. Pixel-verified: 100% map fills screen (corner=red outline), 50% map shrinks inside screen (corner=grey screen shows through, map fills red box), 200% map extends beyond screen (dimmed map + red outline visible outside monitor). Version 1.0.17.
+
+## Phase 5 — Natural hazard overlays (2026-07-11)
+- [x] **5.1 Earthquakes** — new hazards.py fetches USGS earthquake data
+      (CDN summary feeds for standard buckets, FDSN query for arbitrary
+      magnitude). GUI (Clouds & Weather tab): show-earthquakes checkbox,
+      min-magnitude spinbox (0-9), time-window combo (hour/day/week/month).
+      Drawn as magnitude-scaled circles, colour ramp yellow->orange->red->
+      magenta. Cached 5min, last-known-good, backoff, never blocks render.
+- [x] **5.2 Hurricanes** — hazards.py fetches NOAA NHC CurrentStorms.json;
+      GUI checkbox. Drawn as category-coloured spiral glyph at storm centre
+      + name/category label + forecast track polyline (antimeridian-split)
+      where geometry available. Liberal field parsing (feed shape varies).
+      Cached 30min, same robustness.
+- [x] **5.3 Render integration** — _draw_hazards() layers above clouds,
+      below city markers; threaded through all 3 render branches (mirror/
+      span/independent). Worker fetches hazard data best-effort. Every
+      hazard record wrapped so malformed data can't break a render.
+- [x] **5.4 README + attribution** — documented both overlays; added
+      hazards.py to module list; USGS + NOAA NHC public-domain attribution.
+- Session 12 (2026-07-11): Phase 5 complete. Earthquake + hurricane overlays. Sources: USGS (earthquakes, free no-auth GeoJSON - summary feeds + FDSN query), NOAA NHC (hurricanes, CurrentStorms.json). New hazards.py mirrors clouds.py robustness (disk cache, last-known-good, backoff, atomic writes, never raises into renderer). Coords: USGS is [lon,lat,depth] epoch-ms; NHC coords parsed from both numeric and "23.4N"/"81.2W" string forms. Rendering: magnitude-scaled colour-ramped quake circles, category-coloured cyclone spirals with tracks. Layered above clouds/below cities. GUI controls on Clouds & Weather tab. Pixel-verified quake/hurricane colours; visual demo looked clean. Version 1.0.18. Network fetch fails gracefully (sandbox has no USGS/NOAA access; real machine will fetch live).

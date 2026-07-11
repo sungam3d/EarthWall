@@ -105,6 +105,23 @@ NASA Blue Marble / Black Marble imagery.
   you like. If zooming or repositioning leaves any screen area
   uncovered, fill the gap with a **custom colour or background image**.
 
+### Natural hazards (live data)
+
+- **Earthquake overlay** — plot recent earthquakes from the USGS
+  Earthquake Hazards Program (free, public, no account). Choose a
+  **minimum magnitude** and a **time window** (past hour / day / week /
+  month); quakes are drawn as circles that scale with magnitude and ramp
+  in colour from yellow through orange and red to magenta as they get
+  stronger, so a glance shows you where the significant activity is.
+- **Hurricane / tropical-cyclone tracker** — plot active storms from
+  NOAA's National Hurricane Center. Each storm is drawn as a spiral at
+  its current position, coloured by category (tropical depression,
+  tropical storm, Cat 1–5), labelled with its name, and — where the
+  forecast geometry is available — traced along its predicted track.
+  Both overlays refresh automatically and fail gracefully: if the data
+  service is briefly unreachable, the last good data keeps showing and
+  the wallpaper render is never held up.
+
 ### City markers
 
 - **Searchable city database** of ~130 major cities — pick one and its
@@ -243,6 +260,10 @@ switching between the two is seamless.
 - `earthwall/weather.py` fetches per-city weather from Open-Meteo, with
   a per-city cache, retry backoff, and a non-blocking cached-read API
   for the GUI status column.
+- `earthwall/hazards.py` fetches the optional earthquake (USGS) and
+  active-hurricane (NOAA NHC) overlays, with the same disk-cache /
+  last-known-good / backoff robustness as the cloud layer, so a network
+  hiccup never blanks the overlay or stalls a render.
 - `earthwall/fonts.py` scans the system's font directories at startup
   and provides a stable family / style lookup for label rendering,
   falling back gracefully if a chosen font isn't installed.
@@ -273,4 +294,6 @@ Day and night map imagery is NASA's public-domain "Blue Marble" and
 sourced from the free [live-cloud-maps](https://github.com/matteason/live-cloud-maps)
 project, built on public satellite data. Weather data comes from
 [Open-Meteo](https://open-meteo.com), a free weather API released under
-CC BY 4.0.
+CC BY 4.0. Earthquake data is from the U.S. Geological Survey (USGS)
+Earthquake Hazards Program, and active tropical-cyclone data from NOAA's
+National Hurricane Center — both public-domain U.S. government sources.

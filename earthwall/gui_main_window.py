@@ -6,7 +6,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QPixmap, QColor
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QFormLayout, QGroupBox,
+    QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox,
     QHBoxLayout, QHeaderView, QLabel, QListWidget, QListWidgetItem,
     QMainWindow, QMessageBox, QProgressBar, QPushButton, QScrollArea,
     QSizePolicy, QSpinBox,
@@ -286,6 +286,59 @@ class MainWindow(QMainWindow):
         self.temp_units_combo.currentIndexChanged.connect(self._on_settings_changed)
         temp_form.addRow("Temperature units:", self.temp_units_combo)
         layout.addWidget(temp_box)
+
+        # ----- Natural hazards -----
+        hazards_box = QGroupBox("Natural hazards (live data)")
+        hazards_layout = QVBoxLayout(hazards_box)
+
+        # Earthquakes
+        self.earthquakes_check = QCheckBox(
+            "Show earthquakes on the map (USGS, updates every few minutes)")
+        self.earthquakes_check.toggled.connect(self._on_settings_changed)
+        hazards_layout.addWidget(self.earthquakes_check)
+
+        eq_row = QHBoxLayout()
+        eq_row.addWidget(QLabel("Minimum magnitude:"))
+        self.earthquake_mag_spin = QDoubleSpinBox()
+        self.earthquake_mag_spin.setRange(0.0, 9.0)
+        self.earthquake_mag_spin.setSingleStep(0.5)
+        self.earthquake_mag_spin.setDecimals(1)
+        self.earthquake_mag_spin.valueChanged.connect(self._on_settings_changed)
+        eq_row.addWidget(self.earthquake_mag_spin)
+        eq_row.addSpacing(16)
+        eq_row.addWidget(QLabel("Time window:"))
+        self.earthquake_period_combo = QComboBox()
+        self.earthquake_period_combo.addItem("Past hour", "hour")
+        self.earthquake_period_combo.addItem("Past day", "day")
+        self.earthquake_period_combo.addItem("Past week", "week")
+        self.earthquake_period_combo.addItem("Past month", "month")
+        self.earthquake_period_combo.currentIndexChanged.connect(self._on_settings_changed)
+        eq_row.addWidget(self.earthquake_period_combo)
+        eq_row.addStretch()
+        hazards_layout.addLayout(eq_row)
+
+        eq_legend = QLabel(
+            "Circles scale with magnitude and ramp yellow → orange → red → "
+            "magenta as quakes get stronger.")
+        eq_legend.setWordWrap(True)
+        eq_legend.setStyleSheet("color:#888; font-size:11px;")
+        hazards_layout.addWidget(eq_legend)
+
+        # Hurricanes
+        self.hurricanes_check = QCheckBox(
+            "Show active hurricanes / tropical cyclones (NOAA NHC)")
+        self.hurricanes_check.toggled.connect(self._on_settings_changed)
+        hazards_layout.addWidget(self.hurricanes_check)
+
+        hur_legend = QLabel(
+            "Draws each active storm's spiral at its current position, "
+            "coloured by category (TD/TS/C1–C5), with its forecast track "
+            "where available. Data covers the Atlantic and Pacific basins.")
+        hur_legend.setWordWrap(True)
+        hur_legend.setStyleSheet("color:#888; font-size:11px;")
+        hazards_layout.addWidget(hur_legend)
+
+        layout.addWidget(hazards_box)
 
         layout.addStretch()
         return w
@@ -933,6 +986,23 @@ class MainWindow(QMainWindow):
         self.night_view_check.setChecked(bool(s.get("night_view", True)))
         self.night_view_check.blockSignals(False)
 
+        if hasattr(self, "earthquakes_check"):
+            self.earthquakes_check.blockSignals(True)
+            self.earthquakes_check.setChecked(bool(s.get("show_earthquakes", False)))
+            self.earthquakes_check.blockSignals(False)
+            self.earthquake_mag_spin.blockSignals(True)
+            self.earthquake_mag_spin.setValue(float(s.get("earthquake_min_mag", 4.5)))
+            self.earthquake_mag_spin.blockSignals(False)
+            self.earthquake_period_combo.blockSignals(True)
+            per = s.get("earthquake_period", "week")
+            for i in range(self.earthquake_period_combo.count()):
+                if self.earthquake_period_combo.itemData(i) == per:
+                    self.earthquake_period_combo.setCurrentIndex(i); break
+            self.earthquake_period_combo.blockSignals(False)
+            self.hurricanes_check.blockSignals(True)
+            self.hurricanes_check.setChecked(bool(s.get("show_hurricanes", False)))
+            self.hurricanes_check.blockSignals(False)
+
         # --- Multi-monitor / Displays tab ---
         if hasattr(self, "monitors_mode_combo"):
             self.monitors_mode_combo.blockSignals(True)
@@ -1033,6 +1103,12 @@ class MainWindow(QMainWindow):
         self.settings["cloud_opacity"] = self.cloud_opacity_slider.value() / 100
         self.settings["cloud_density"] = self.cloud_density_slider.value() / 100
         self.settings["night_view"] = self.night_view_check.isChecked()
+        if hasattr(self, "earthquakes_check"):
+            self.settings["show_earthquakes"] = self.earthquakes_check.isChecked()
+            self.settings["earthquake_min_mag"] = float(self.earthquake_mag_spin.value())
+            self.settings["earthquake_period"] = \
+                self.earthquake_period_combo.currentData() or "week"
+            self.settings["show_hurricanes"] = self.hurricanes_check.isChecked()
         if hasattr(self, "start_in_tray_check"):
             self.settings["start_in_tray"] = self.start_in_tray_check.isChecked()
         # --- Multi-monitor / Displays tab ---

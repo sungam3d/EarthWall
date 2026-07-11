@@ -26,6 +26,11 @@ DEFAULTS = {
     "cloud_density": 1.0,   # 1.0 = raw satellite coverage; lower thins the field
     "night_view": True,     # False = full daylight map, no terminator/night side
     "start_in_tray": False, # True = launch hidden in the system tray
+    # --- Hazard overlays ---
+    "show_earthquakes": False,
+    "earthquake_min_mag": 4.5,     # only show quakes at/above this magnitude
+    "earthquake_period": "week",   # hour | day | week | month
+    "show_hurricanes": False,      # active tropical cyclones from NOAA NHC
     # --- Multi-monitor (Phase 2) ---
     # "mirror"      = same map image on every monitor (default, back-compat)
     # "span"        = one wide image stretched across all monitors as one

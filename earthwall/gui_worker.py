@@ -59,6 +59,31 @@ class RenderWorker(QThread):
 
             weather_by_city = self._gather_weather()
 
+            # Hazard overlays (optional, best-effort - never block or fail
+            # the render if the network is down).
+            earthquakes = None
+            if self.settings.get("show_earthquakes"):
+                try:
+                    from . import hazards as hazards_module
+                    earthquakes = hazards_module.get_earthquakes(
+                        self.settings.get("earthquake_min_mag", 4.5),
+                        self.settings.get("earthquake_period", "week"),
+                    )
+                except Exception:
+                    earthquakes = None
+            hurricanes = None
+            if self.settings.get("show_hurricanes"):
+                try:
+                    from . import hazards as hazards_module
+                    hurricanes = hazards_module.get_hurricanes()
+                    # Attach track geometry for any storm that offers it.
+                    for storm in hurricanes or []:
+                        turl = storm.get("track_url")
+                        if turl:
+                            storm["_track_points"] = hazards_module.fetch_track_points(turl)
+                except Exception:
+                    hurricanes = None
+
             render(
                 self.output_path,
                 self.width,
@@ -90,6 +115,8 @@ class RenderWorker(QThread):
                 void_fill_image=(self.settings.get("monitor_configs", {})
                                  .get("0", {}).get("void_fill_image")),
                 monitor_configs=self.settings.get("monitor_configs"),
+                earthquakes=earthquakes,
+                hurricanes=hurricanes,
             )
 
             if self.apply_wallpaper:

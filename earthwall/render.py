@@ -178,6 +178,129 @@ def _apply_clouds(base: Image.Image, cloud_layer: Image.Image, center_lon: float
     return Image.alpha_composite(base, cloud_layer).convert("RGB")
 
 
+def _draw_hazards(img: Image.Image, center_lon: float,
+                  earthquakes: list | None, hurricanes: list | None) -> Image.Image:
+    """Draw earthquake and tropical-cyclone overlays on the map.
+
+    Earthquakes: a translucent filled circle whose radius scales with
+    magnitude and whose colour ramps yellow->orange->red->magenta with
+    strength, plus a thin outline so small quakes stay visible over busy
+    terrain. Larger quakes draw on top (the caller pre-sorts strongest-
+    first, so we draw in reverse to keep big ones uppermost).
+
+    Hurricanes: the storm's forecast/best track as a polyline (if we have
+    the geometry), then a spiral cyclone glyph at the current centre
+    sized/coloured by category, with the storm name beside it.
+
+    Both overlays are optional; passing None or an empty list draws
+    nothing for that layer. Everything is wrapped so a malformed record
+    can never break the render."""
+    if not earthquakes and not hurricanes:
+        return img
+
+    w, h = img.size
+    overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+
+    # ---- Earthquakes (weakest first so strongest end up on top) ----
+    for q in reversed(earthquakes or []):
+        try:
+            mag = q.get("mag", 0.0)
+            x, y = _lonlat_to_xy(q["lon"], q["lat"], w, h, center_lon)
+            # Radius grows with magnitude; scaled to image width so it's
+            # sensible at any resolution. ~M2 tiny, ~M8 prominent.
+            base = max(2.0, w / 900.0)
+            r = int(base * (1.4 ** max(0.0, mag)))
+            r = max(2, min(r, int(w / 18)))  # clamp so a big quake isn't absurd
+            color = _quake_color(mag)
+            draw.ellipse([x - r, y - r, x + r, y + r],
+                         fill=color, outline=(20, 20, 20, 200), width=1)
+        except Exception:
+            continue
+
+    # ---- Hurricanes ----
+    for s in (hurricanes or []):
+        try:
+            _draw_one_storm(draw, s, w, h, center_lon)
+        except Exception:
+            continue
+
+    return Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
+
+
+def _quake_color(mag: float) -> tuple:
+    """Yellow (small) -> orange -> red -> magenta (great), semi-transparent."""
+    if mag < 3:
+        return (255, 235, 59, 150)     # yellow
+    if mag < 5:
+        return (255, 152, 0, 170)      # orange
+    if mag < 6.5:
+        return (244, 67, 54, 185)      # red
+    if mag < 8:
+        return (211, 47, 47, 200)      # deep red
+    return (233, 30, 99, 210)          # magenta for the great ones
+
+
+# Category colour ramp for cyclones (TD..C5).
+_CYCLONE_COLORS = {
+    0: (120, 180, 255, 230),   # TD - pale blue
+    1: (0, 200, 200, 235),     # TS - teal
+    2: (0, 230, 120, 235),     # C1 - green
+    3: (240, 230, 60, 240),    # C2 - yellow
+    4: (255, 160, 30, 240),    # C3 - orange
+    5: (255, 70, 70, 245),     # C4 - red
+    6: (233, 30, 160, 250),    # C5 - magenta
+}
+
+
+def _draw_one_storm(draw: ImageDraw.ImageDraw, storm: dict, w: int, h: int,
+                    center_lon: float) -> None:
+    rank = storm.get("cat_rank", 0)
+    color = _CYCLONE_COLORS.get(rank, (200, 200, 200, 235))
+
+    # Track polyline first, so the glyph sits on top of it.
+    track = storm.get("_track_points") or []
+    if len(track) >= 2:
+        pts = [_lonlat_to_xy(lon, lat, w, h, center_lon) for lon, lat in track]
+        # Break the line where it wraps the antimeridian to avoid a long
+        # horizontal streak across the whole map.
+        seg = [pts[0]]
+        for prev, cur in zip(pts, pts[1:]):
+            if abs(cur[0] - prev[0]) > w / 2:
+                if len(seg) >= 2:
+                    draw.line(seg, fill=(255, 255, 255, 150), width=max(1, w // 1400))
+                seg = [cur]
+            else:
+                seg.append(cur)
+        if len(seg) >= 2:
+            draw.line(seg, fill=(255, 255, 255, 150), width=max(1, w // 1400))
+
+    cx, cy = _lonlat_to_xy(storm["lon"], storm["lat"], w, h, center_lon)
+    r = max(6, int(w / 130) + rank * max(2, w // 900))
+
+    # Cyclone glyph: two curved "arms" (approximated by arcs) plus an eye,
+    # evoking the classic spiral without needing a bitmap.
+    bbox = [cx - r, cy - r, cx + r, cy + r]
+    draw.arc(bbox, start=20, end=200, fill=color, width=max(2, r // 4))
+    draw.arc(bbox, start=200, end=380, fill=color, width=max(2, r // 4))
+    eye = max(2, r // 3)
+    draw.ellipse([cx - eye, cy - eye, cx + eye, cy + eye],
+                 fill=color, outline=(255, 255, 255, 230), width=1)
+
+    # Name + category label beside the glyph.
+    label = f"{storm.get('name', '')} ({storm.get('category', '?')})".strip()
+    if label:
+        try:
+            font = _load_font(max(11, int(w / 130)))
+            tx, ty = cx + r + 4, cy - r
+            # Cheap readability: dark outline behind the text.
+            for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                draw.text((tx + dx, ty + dy), label, font=font, fill=(0, 0, 0, 200))
+            draw.text((tx, ty), label, font=font, fill=(255, 255, 255, 240))
+        except Exception:
+            pass
+
+
 def _lonlat_to_xy(lon: float, lat: float, width: int, height: int, center_lon: float) -> tuple[int, int]:
     rel_lon = ((lon - center_lon + 180) % 360) - 180
     x = (rel_lon + 180) / 360 * width
@@ -622,11 +745,13 @@ def _render_map_image(width: int, height: int, cities: list[dict],
                        twilight_width_deg: float, night_darkness: float,
                        cloud_layer, cloud_opacity: float, cloud_density: float,
                        night_view: bool, temp_units: str,
-                       weather_by_city: dict | None) -> Image.Image:
+                       weather_by_city: dict | None,
+                       earthquakes: list | None = None,
+                       hurricanes: list | None = None) -> Image.Image:
     """Produce a single (width x height) map image with day/night,
-    clouds, and city markers all applied. Extracted from render() so the
-    independent multi-monitor branch can call it once per monitor with
-    per-monitor parameters."""
+    clouds, hazard overlays, and city markers all applied. Extracted from
+    render() so the independent multi-monitor branch can call it once per
+    monitor with per-monitor parameters."""
     day_img, night_img = _load_maps(map_id)
     # Downsample to target size BEFORE the per-pixel day/night blend -
     # blend and unsharp then scale with the requested output size rather
@@ -647,6 +772,11 @@ def _render_map_image(width: int, height: int, cities: list[dict],
         composite = _apply_clouds(composite, cloud_layer, center_lon,
                                    cloud_opacity, cloud_density)
 
+    # Hazard overlays sit above clouds (so a quake isn't hidden under an
+    # opaque cloud) but below city markers (so your labelled cities stay
+    # legible on top).
+    composite = _draw_hazards(composite, center_lon, earthquakes, hurricanes)
+
     composite = _draw_city_markers(composite, cities, when.astimezone(),
                                     center_lon, temp_units=temp_units,
                                     weather_by_city=weather_by_city)
@@ -660,7 +790,9 @@ def _render_monitor_view(monitor, monitor_config: dict, global_center_lon: float
                           night_darkness: float, cloud_layer,
                           cloud_opacity: float, cloud_density: float,
                           night_view: bool, temp_units: str,
-                          weather_by_city: dict | None) -> Image.Image:
+                          weather_by_city: dict | None,
+                          earthquakes: list | None = None,
+                          hurricanes: list | None = None) -> Image.Image:
     """Render a single monitor's view in "independent" mode, sized to
     that monitor's exact pixel dimensions.
 
@@ -685,7 +817,8 @@ def _render_monitor_view(monitor, monitor_config: dict, global_center_lon: float
     img = _render_map_image(render_w, render_h, cities, when, sub_lat, sub_lon,
                              map_id, m_lon, twilight_width_deg, night_darkness,
                              cloud_layer, cloud_opacity, cloud_density,
-                             night_view, temp_units, weather_by_city)
+                             night_view, temp_units, weather_by_city,
+                             earthquakes, hurricanes)
 
     if zoom > 1.0:
         # Centre-crop to monitor size; latitude focal shifts the crop
@@ -736,7 +869,10 @@ def render(output_path: str | Path, width: int, height: int,
            void_fill_image: str | None = None,
            # Full per-monitor config dict (only read in independent mode).
            # Keyed by monitor index as a string, matching monitors.py.
-           monitor_configs: dict | None = None) -> None:
+           monitor_configs: dict | None = None,
+           # --- Hazard overlays ---
+           earthquakes: list | None = None,
+           hurricanes: list | None = None) -> None:
     """Render one wallpaper frame and save it to `output_path`.
 
     Modes:
@@ -776,7 +912,7 @@ def render(output_path: str | Path, width: int, height: int,
                 m, cfg, center_lon, center_lat, cities, when, sub_lat, sub_lon,
                 map_id, twilight_width_deg, night_darkness, cloud_layer,
                 cloud_opacity, cloud_density, night_view, temp_units,
-                weather_by_city,
+                weather_by_city, earthquakes, hurricanes,
             )
             lx, ly, _, _ = monitor_layout.local_rect(m)
             canvas.paste(mon_img, (lx, ly))
@@ -798,6 +934,7 @@ def render(output_path: str | Path, width: int, height: int,
             map_w, map_h, cities, when, sub_lat, sub_lon, map_id, center_lon,
             twilight_width_deg, night_darkness, cloud_layer, cloud_opacity,
             cloud_density, night_view, temp_units, weather_by_city,
+            earthquakes, hurricanes,
         )
         composite = _compose_multi_monitor(
             map_img, virtual_w, virtual_h, map_w, map_h, map_x, map_y,
@@ -810,6 +947,7 @@ def render(output_path: str | Path, width: int, height: int,
             width, height, cities, when, sub_lat, sub_lon, map_id, center_lon,
             twilight_width_deg, night_darkness, cloud_layer, cloud_opacity,
             cloud_density, night_view, temp_units, weather_by_city,
+            earthquakes, hurricanes,
         )
 
     output_path = Path(output_path)
