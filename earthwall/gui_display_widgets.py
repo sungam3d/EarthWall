@@ -22,7 +22,6 @@ and on a laptop screen without any manual sizing.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
 from PySide6.QtCore import QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QMouseEvent, QPainter, QPen, QPixmap
@@ -82,9 +81,19 @@ class ScreenAreaPreview(QWidget):
     # ----- painting ----------------------------------------------------
     def _fit_transform(self) -> tuple[float, float, float]:
         """Return (scale, offset_x, offset_y) mapping virtual-desktop
-        coords into widget coords, with a small internal margin so the
-        red outline isn't clipped by the widget edge."""
-        margin = 10
+        coords into widget coords.
+
+        Critically, this fits ONLY the virtual desktop (the monitor
+        rectangles) into the widget - never the map area. That means the
+        monitor rectangle is always drawn at the same size and always
+        fully visible, no matter how far the map is zoomed in or out. The
+        map rectangle is then drawn relative to that same transform and
+        simply clipped to the widget if it spills outside (zoom > 100%),
+        so the desktop appears to sit *behind* the map exactly as it
+        does on the real screen. Reserves a generous margin so a zoomed-
+        out map (which sits inside the monitor) still has room, and a
+        zoomed-in map's overflow has somewhere to bleed to."""
+        margin = 24
         avail_w = max(1, self.width() - margin * 2)
         avail_h = max(1, self.height() - margin * 2)
         if self._layout is None or self._layout.virtual_width <= 0:
@@ -92,7 +101,6 @@ class ScreenAreaPreview(QWidget):
         sx = avail_w / self._layout.virtual_width
         sy = avail_h / self._layout.virtual_height
         s = min(sx, sy)
-        # Centre the scaled desktop inside the widget.
         used_w = self._layout.virtual_width * s
         used_h = self._layout.virtual_height * s
         ox = (self.width() - used_w) / 2 - self._layout.virtual_x * s
@@ -143,6 +151,14 @@ class ScreenAreaPreview(QWidget):
         # 2. Paint the map thumbnail (if any) inside the map-area rect,
         #    then draw the red outline over the top and a "1" view badge
         #    in the corner - the visual signature EarthView uses.
+        #
+        #    The map rect is CLIPPED to the widget interior: when the map
+        #    is zoomed past 100% it's larger than the desktop and would
+        #    otherwise draw outside the widget (or, worse, force a rescale
+        #    that shrank the monitor). Clipping means the overflow simply
+        #    bleeds off the edge - the monitor rectangle keeps its size
+        #    and stays fully visible, with the map sitting over/behind it
+        #    just like on the real screen.
         area = self._map_area
         if area is None:
             # Default: whole virtual desktop
@@ -155,6 +171,8 @@ class ScreenAreaPreview(QWidget):
         rh = ah * s
         map_rect = QRectF(rx, ry, rw, rh)
 
+        p.save()
+        p.setClipRect(self.rect())
         if self._map_thumb is not None and not self._map_thumb.isNull():
             # Draw the thumbnail scaled to fill the map area (aspect not
             # preserved - the real wallpaper stretches to fill too).
@@ -163,7 +181,13 @@ class ScreenAreaPreview(QWidget):
         p.setBrush(Qt.NoBrush)
         p.setPen(QPen(_RED, 2))
         p.drawRect(map_rect)
-        self._draw_badge(p, int(rx + 4), int(ry + 4), "1", _BADGE_BG)
+        p.restore()
+        # Badge drawn unclipped so it's always readable even if the map's
+        # own corner is off-screen; pin it to the visible part of the map
+        # rect so it doesn't float away when zoomed in.
+        badge_x = int(max(self.rect().left() + 4, min(rx + 4, self.rect().right() - 24)))
+        badge_y = int(max(self.rect().top() + 4, min(ry + 4, self.rect().bottom() - 20)))
+        self._draw_badge(p, badge_x, badge_y, "1", _BADGE_BG)
 
     def _draw_badge(self, p: QPainter, x: int, y: int, text: str,
                     bg: QColor) -> None:

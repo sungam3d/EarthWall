@@ -43,7 +43,6 @@ class RenderWorker(QThread):
         on the steady-state case (all cached, no network); expensive only
         on the first render after startup or after a long pause."""
         result = {}
-        temp_units = self.settings.get("temp_units", "C")
         for i, city in enumerate(self.cities):
             if not city.get("show_weather"):
                 continue

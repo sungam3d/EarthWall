@@ -83,6 +83,34 @@
       Default case (mirror, 100%, no offset) still returns None -> fast path.
       Verified: mirror+zoom50 shows void border in the real render output.
 
+## Phase 4 — GUI polish + number inputs (2026-07-11)
+- [x] **4.1 Screen-area zoom behaviour** — monitor rectangle now stays a
+      FIXED size at every zoom level; only the map rect scales, clipped to
+      the widget so overflow (zoom>100%) bleeds off-edge instead of forcing
+      a rescale that shrank the monitor. _fit_transform fits only the virtual
+      desktop (never the map area); map drawn under a setClipRect; badge
+      pinned to the visible region. Verified monitor rect identical at
+      50/100/300% zoom.
+- [x] **4.2 LabeledSlider widget** — new gui_widgets.LabeledSlider pairs a
+      ClickJumpSlider with a synced QSpinBox (two-way, feedback-loop-safe),
+      exposing a plain-slider-compatible value()/setValue()/valueChanged API.
+      setValue() is silent (load path safe); user edits emit once.
+- [x] **4.3 Number inputs everywhere** — converted to LabeledSlider: cloud
+      opacity, cloud density, twilight (sharp), night darkness (shadows),
+      map zoom. Added dedicated X/Y (lon/lat) number boxes for the map-center
+      red dot, synced both ways with dragging. Removed all the old read-only
+      "value_label" QLabels these replace.
+- [x] **4.4 README** — refreshed: five-tab overview, multi-monitor modes,
+      cloud opacity vs density, night toggle, start-in-tray, draggable dot +
+      number boxes, crash log; added monitors.py / gui_display_widgets.py to
+      the module list; fixed stale "2:1 preview" note.
+- [x] **4.5 Code review** — py_compile + pyflakes clean across all modules;
+      removed dead imports (QSlider/QDoubleSpinBox in main window, QSlider in
+      city dialog, QEvent in widgets, Optional in display widgets) and two
+      dead locals (gui_worker temp_units, autostart module_dir). Verified
+      _render_layout engagement logic (default=None fast path; zoom/offset/
+      independent engage), focal extremes, and silent-load behaviour.
+
 ## Reference notes
 - Bug repro: Update now → move cloud opacity → preview stretches; Update now fixes.
   Root cause confirmed in code (hardcoded 2:1 preview vs screen-aspect wallpaper).
@@ -102,3 +130,4 @@
 - Session 8 (2026-07-11): CRASH FIX. App is Linux-only (Windows references in session 7 were a mistaken tangent - disregard). v1.0.13's crash-on-load was the bare QListView() set as the mode combo's popup view: PySide6 lets the Python wrapper be garbage-collected while Qt still holds the C++ pointer -> segfault under real xcb (invisible under offscreen platform, which is why earlier tests missed it). REMOVED the setView(QListView()) call; the setMaxVisibleItems(10) + setMinimumContentsLength(38) setters fix the one-row-popup display bug on their own. Added a global crash logger (gui.py _install_crash_logger): sys.excepthook writes full tracebacks to ~/.config/earthwall/earthwall_crash.log + shows a QMessageBox, so future crashes are diagnosable instead of silent. Hardened detect_layout() against zero-size/phantom screens (common mid-"Extend displays" toggle) and null primaryScreen. Wrapped both display-widget paintEvents in try/except (a raised exception in paintEvent can hard-crash Qt). Verified the full load + popup + extended-desktop + per-monitor-edit + focal-drag + repaint path under REAL xcb (xvfb + libxcb-cursor0) with zero crashes and empty crash log. Version 1.0.14.
   NOTE for future sessions: wallpaper.py is Linux-DE only (gnome/kde/cinnamon/xfce/mate/sway/feh) - no Windows/macOS paths, and that's correct/intended.
 - Session 9 (2026-07-11): Phase 3 GUI redesign complete (see Phase 3 section). Biggest win: fixed the long-standing bug where Displays-tab zoom/X/Y never affected the actual desktop (only the preview) - _render_layout() now engages the placement render path for any non-default zoom/offset, and render() treats mirror+layout as span. Also split Clouds & Weather into its own tab, moved the draggable focal dot to Map & View (replacing the longitude slider), added start-in-tray option, made the Displays screen-area preview taller, and fixed the inverted-zoom bug that made it wide+short below 100%. Version 1.0.15. Verified end-to-end under real xcb.
+- Session 10 (2026-07-11): Phase 4 (see section). Fixed screen-area zoom so the monitor rect never resizes (only the map scales, clipped to widget) - the wide+short breakage below 100% is gone. Added LabeledSlider (slider + synced number box) and rolled it out to cloud opacity/density, twilight, night darkness, and zoom; added X/Y number boxes for the map-center dot. Refreshed README with all Phase 2-4 features. Code review: pyflakes clean, removed dead imports/locals. Version 1.0.16. Verified end-to-end under real xcb.

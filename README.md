@@ -32,13 +32,23 @@ NASA Blue Marble / Black Marble imagery.
 
 ![Cities tab](assets/screenshots/SS-Cities.jpg)
 
+> The app is organised into five tabs: **General** (update interval,
+> resolution, start-at-login, start-in-tray), **Map & View** (map picker,
+> draggable map-center dot, day/night edge and darkness), **Clouds &
+> Weather** (live cloud overlay, cloud opacity/density, night-side
+> toggle, temperature units), **Displays** (multi-monitor mode, per-
+> monitor zoom/placement, void fill), and **Cities** (all city markers).
+> Every slider throughout the app has a matching number box for typing an
+> exact value.
+
 ## What's in the GUI
 
 ### Live preview and updates
 
-- **Live preview** of the current render at a fixed 2:1 aspect ratio (no
-  resizing or flicker as settings change), with a one-click "Update Now",
-  a pause/resume toggle, and a countdown to the next automatic update.
+- **Live preview** of the current render, matched to your screen's
+  aspect ratio (no resizing or flicker as settings change), with a
+  one-click "Update Now", a pause/resume toggle, and a countdown to the
+  next automatic update.
 - The preview re-renders instantly (at low resolution) whenever you
   change any setting, with an overlay busy indicator while it works — the
   progress bar is drawn *over* the preview so it never causes layout to
@@ -58,9 +68,11 @@ NASA Blue Marble / Black Marble imagery.
   Almost any image format works (JPEG, PNG, BMP, TIFF, WEBP, GIF) —
   it's decoded and converted automatically. If you only supply a day
   map, the bundled night-lights map is paired with it automatically.
-- **Map re-centering** — a slider/spinner to shift which longitude sits
-  in the middle of the map, with quick presets (Americas, Atlantic, Asia,
-  Pacific / Australia).
+- **Map re-centering** — a draggable red dot on a small world map lets
+  you pick the exact point that sits at the centre of your wallpaper:
+  left/right for longitude, up/down for latitude. Quick presets
+  (Americas, Atlantic, Asia, Pacific / Australia) jump the dot, and X/Y
+  number boxes let you type precise coordinates.
 - **Day/night edge softness slider** — from a crisp terminator line to
   a wide, soft dusk band.
 - **Night side darkness slider** — controls how dark the unlit half of
@@ -68,10 +80,30 @@ NASA Blue Marble / Black Marble imagery.
   unlit landscape and ocean darken, so you can dial from a soft
   "blue-hour" look through to a genuine deep-black night with just
   glowing cities.
+- **Night-side toggle** — turn the whole day/night effect off for a
+  flat, evenly-lit daytime map everywhere, if you prefer it.
 - **Live cloud overlay** (optional) — a free, near-real-time global
-  cloud layer that updates every ~3 hours, with an opacity slider. If a
-  refresh fails (offline, service hiccup), the last good cloud layer
-  keeps being used rather than clouds blinking off.
+  cloud layer that updates every ~3 hours. Two independent controls:
+  **opacity** (how solid the cloud appears) and **density** (how much
+  of the sky is covered — thins the wispy cloud away first, keeping
+  storm cores, so you get visible weather without the whole map being
+  blanked out under overcast). If a refresh fails (offline, service
+  hiccup), the last good cloud layer keeps being used rather than
+  clouds blinking off.
+
+### Multiple monitors
+
+- **Full multi-monitor support** with three modes: **Mirror** (the same
+  map on every screen), **Stretch** (one continuous map spanning the
+  whole desktop), and **Custom per-monitor** (each screen gets its own
+  independent map view, zoom, and center point).
+- **Screen-area preview** shows your actual monitor layout — including
+  offset and diagonal arrangements — with the map area outlined in red,
+  so you can see exactly how the wallpaper will land before applying it.
+- **Zoom and reposition** the map on the desktop: a zoom slider (with
+  number box) plus X/Y position controls, so you can frame the map how
+  you like. If zooming or repositioning leaves any screen area
+  uncovered, fill the gap with a **custom colour or background image**.
 
 ### City markers
 
@@ -114,8 +146,14 @@ NASA Blue Marble / Black Marble imagery.
   wallpaper keeps auto-updating in the background. Right-click the tray
   icon for quick actions (open settings, update now, pause, quit).
 - **Start at login** — one checkbox, no manual systemd setup required.
+- **Start in system tray** — optionally launch straight to the tray
+  (window hidden), ideal paired with start-at-login so the wallpaper
+  just updates quietly in the background from boot.
 - **Applications menu entry** added automatically on first launch, so
   you can search "EarthWall" in your app launcher like any other program.
+- **Crash-resilient** — an unexpected error is logged to
+  `~/.config/earthwall/earthwall_crash.log` and surfaced in a dialog
+  rather than silently killing the app.
 
 ## Install
 
@@ -188,8 +226,15 @@ switching between the two is seamless.
   directly overhead) using the standard NOAA solar position formulas.
 - `earthwall/render.py` blends the day and night maps together across a
   soft twilight band along the terminator, optionally re-centers the map
-  on a chosen longitude, layers in live clouds if enabled, and draws
-  city markers with fully customisable multi-row styled labels on top.
+  on a chosen longitude/latitude, layers in live clouds if enabled, and
+  draws city markers with fully customisable multi-row styled labels on
+  top. For multi-monitor setups it composes a single spanned image or
+  per-monitor views onto a virtual-desktop canvas, honouring zoom,
+  position, and void fill.
+- `earthwall/monitors.py` detects the connected displays (geometry,
+  position, primary), builds the virtual-desktop bounding box — handling
+  offset and diagonal arrangements — and manages the per-monitor
+  placement config.
 - `earthwall/maps.py` manages built-in and user-imported map sets, and
   handles decoding and validating whatever image format you throw at it.
 - `earthwall/clouds.py` fetches the optional live cloud layer, with
@@ -202,14 +247,21 @@ switching between the two is seamless.
   and provides a stable family / style lookup for label rendering,
   falling back gracefully if a chosen font isn't installed.
 - `earthwall/wallpaper.py` detects your desktop environment (GNOME, KDE
-  Plasma, XFCE, Cinnamon, MATE, or a generic X11 WM) and sets the
+  Plasma, XFCE, Cinnamon, MATE, Sway, or a generic X11 WM) and sets the
   rendered image as your wallpaper the right way for each, alternating
-  between two output files for flicker-free updates.
+  between two output files for flicker-free updates. For spanned/multi-
+  monitor output it selects the DE's "spanned" mode so one image
+  stretches correctly across all screens.
 - `earthwall/gui.py` + `earthwall/gui_main_window.py` are the PySide6
   desktop app: a system tray icon plus a settings window, with renders
-  running on a background thread so the UI never freezes.
-- `earthwall/gui_widgets.py` provides shared custom widgets, notably a
-  click-to-jump QSlider subclass used everywhere in the app.
+  running on a background thread so the UI never freezes. A global crash
+  handler logs any uncaught error to a file and shows a dialog.
+- `earthwall/gui_widgets.py` provides shared custom widgets: a
+  click-to-jump QSlider subclass, and a LabeledSlider that pairs that
+  slider with a synced number box (used for every slider in the app).
+- `earthwall/gui_display_widgets.py` provides the Displays-tab widgets:
+  the screen-area layout preview (monitors + red map-area outline) and
+  the draggable map-center dot picker.
 - `earthwall/autostart.py` manages the XDG autostart entry (login) and
   application-menu entry (launcher), both via standard `.desktop` files
   that work across desktop environments.

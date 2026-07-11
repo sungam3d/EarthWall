@@ -6,17 +6,17 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QPixmap, QColor
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox,
+    QCheckBox, QComboBox, QFormLayout, QGroupBox,
     QHBoxLayout, QHeaderView, QLabel, QListWidget, QListWidgetItem,
     QMainWindow, QMessageBox, QProgressBar, QPushButton, QScrollArea,
-    QSizePolicy, QSlider, QSpinBox,
+    QSizePolicy, QSpinBox,
     QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from . import autostart, maps as maps_module, settings as settings_module
 from .gui_city_dialog import CityDialog
 from .gui_map_dialog import ImportMapDialog
-from .gui_widgets import ClickJumpSlider
+from .gui_widgets import ClickJumpSlider, LabeledSlider
 from .gui_worker import RenderWorker
 from .wallpaper import pick_next_wallpaper_path
 
@@ -251,10 +251,9 @@ class MainWindow(QMainWindow):
 
         opacity_row = QHBoxLayout()
         opacity_row.addWidget(QLabel("Cloud opacity:"))
-        self.cloud_opacity_slider = ClickJumpSlider(Qt.Horizontal)
-        self.cloud_opacity_slider.setRange(0, 100)
+        self.cloud_opacity_slider = LabeledSlider(0, 100, suffix=" %")
         self.cloud_opacity_slider.valueChanged.connect(self._on_settings_changed)
-        opacity_row.addWidget(self.cloud_opacity_slider)
+        opacity_row.addWidget(self.cloud_opacity_slider, stretch=1)
         clouds_layout.addLayout(opacity_row)
 
         # Cloud DENSITY thins out the cloud field itself (wispy cloud is
@@ -262,13 +261,9 @@ class MainWindow(QMainWindow):
         # fades everything uniformly. 100% = the raw satellite coverage.
         density_row = QHBoxLayout()
         density_row.addWidget(QLabel("Cloud density:"))
-        self.cloud_density_slider = ClickJumpSlider(Qt.Horizontal)
-        self.cloud_density_slider.setRange(0, 100)
-        self.cloud_density_slider.setValue(100)
+        self.cloud_density_slider = LabeledSlider(0, 100, suffix=" %", value=100)
         self.cloud_density_slider.valueChanged.connect(self._on_settings_changed)
-        density_row.addWidget(self.cloud_density_slider)
-        self.cloud_density_value_label = QLabel("100%")
-        density_row.addWidget(self.cloud_density_value_label)
+        density_row.addWidget(self.cloud_density_slider, stretch=1)
         clouds_layout.addLayout(density_row)
         layout.addWidget(clouds_box)
 
@@ -352,6 +347,27 @@ class MainWindow(QMainWindow):
         self.map_focal_preview.focal_changed.connect(self._on_map_focal_changed)
         center_layout.addWidget(self.map_focal_preview)
 
+        # Exact numeric entry for the dot's position, for users who want
+        # to type a precise longitude/latitude rather than drag. Kept in
+        # sync with the dot both ways: dragging updates these, editing
+        # these moves the dot. Longitude -180..180, latitude -90..90.
+        dot_xy_row = QHBoxLayout()
+        dot_xy_row.addWidget(QLabel("Longitude (X):"))
+        self.focal_lon_spin = QSpinBox()
+        self.focal_lon_spin.setRange(-180, 180)
+        self.focal_lon_spin.setSuffix("°")
+        self.focal_lon_spin.valueChanged.connect(self._on_focal_spin_changed)
+        dot_xy_row.addWidget(self.focal_lon_spin)
+        dot_xy_row.addSpacing(16)
+        dot_xy_row.addWidget(QLabel("Latitude (Y):"))
+        self.focal_lat_spin = QSpinBox()
+        self.focal_lat_spin.setRange(-90, 90)
+        self.focal_lat_spin.setSuffix("°")
+        self.focal_lat_spin.valueChanged.connect(self._on_focal_spin_changed)
+        dot_xy_row.addWidget(self.focal_lat_spin)
+        dot_xy_row.addStretch()
+        center_layout.addLayout(dot_xy_row)
+
         # Hidden longitude slider/spinbox - kept for compatibility with
         # existing load/save and the preset buttons; not shown in the UI
         # now that the dot supersedes it.
@@ -381,38 +397,28 @@ class MainWindow(QMainWindow):
         twilight_box = QGroupBox("Day/night edge softness")
         twilight_layout = QHBoxLayout(twilight_box)
         twilight_layout.addWidget(QLabel("Sharp"))
-        self.twilight_slider = ClickJumpSlider(Qt.Horizontal)
-        self.twilight_slider.setRange(1, 18)
+        self.twilight_slider = LabeledSlider(1, 18, suffix="°")
         self.twilight_slider.setToolTip(
             "Width of the twilight blend along the terminator, in degrees. "
             "Small = crisp line, large = wide soft dusk band."
         )
         self.twilight_slider.valueChanged.connect(self._on_settings_changed)
-        twilight_layout.addWidget(self.twilight_slider)
+        twilight_layout.addWidget(self.twilight_slider, stretch=1)
         twilight_layout.addWidget(QLabel("Soft"))
-        self.twilight_value_label = QLabel("")
-        self.twilight_value_label.setStyleSheet("color:#888;")
-        self.twilight_value_label.setMinimumWidth(28)
-        twilight_layout.addWidget(self.twilight_value_label)
         layout.addWidget(twilight_box)
 
         night_box = QGroupBox("Night side darkness")
         night_layout = QHBoxLayout(night_box)
         night_layout.addWidget(QLabel("Show landscape"))
-        self.night_darkness_slider = ClickJumpSlider(Qt.Horizontal)
-        self.night_darkness_slider.setRange(0, 100)
+        self.night_darkness_slider = LabeledSlider(0, 100, suffix=" %")
         self.night_darkness_slider.setToolTip(
             "How dark the unlit night side gets. Higher = deeper black with "
             "just city lights showing; lower = you can still faintly see the "
             "landscape underneath (the old default)."
         )
         self.night_darkness_slider.valueChanged.connect(self._on_settings_changed)
-        night_layout.addWidget(self.night_darkness_slider)
+        night_layout.addWidget(self.night_darkness_slider, stretch=1)
         night_layout.addWidget(QLabel("Fully dark"))
-        self.night_darkness_value_label = QLabel("")
-        self.night_darkness_value_label.setStyleSheet("color:#888;")
-        self.night_darkness_value_label.setMinimumWidth(40)
-        night_layout.addWidget(self.night_darkness_value_label)
         layout.addWidget(night_box)
 
         layout.addStretch()
@@ -523,14 +529,9 @@ class MainWindow(QMainWindow):
 
         zoom_row = QHBoxLayout()
         zoom_row.addWidget(QLabel("Zoom:"))
-        self.map_zoom_slider = ClickJumpSlider(Qt.Horizontal)
-        self.map_zoom_slider.setRange(50, 400)  # 50% (zoomed out) to 400% (zoomed in)
-        self.map_zoom_slider.setValue(100)
+        self.map_zoom_slider = LabeledSlider(50, 400, suffix=" %", value=100)
         self.map_zoom_slider.valueChanged.connect(self._on_settings_changed)
-        zoom_row.addWidget(self.map_zoom_slider)
-        self.map_zoom_value_label = QLabel("100%")
-        self.map_zoom_value_label.setMinimumWidth(40)
-        zoom_row.addWidget(self.map_zoom_value_label)
+        zoom_row.addWidget(self.map_zoom_slider, stretch=1)
         map_area_layout.addLayout(zoom_row)
 
         # Void fill: colour picker for the area outside the map when the
@@ -676,8 +677,28 @@ class MainWindow(QMainWindow):
             self.center_lon_spin.blockSignals(False)
             self.settings["center_lon"] = float(lon)
             self.settings["center_lat"] = float(lat)
+        # Keep the numeric X/Y inputs in step with the dragged dot.
+        if hasattr(self, "focal_lon_spin"):
+            self.focal_lon_spin.blockSignals(True)
+            self.focal_lat_spin.blockSignals(True)
+            self.focal_lon_spin.setValue(int(round(lon)))
+            self.focal_lat_spin.setValue(int(round(lat)))
+            self.focal_lon_spin.blockSignals(False)
+            self.focal_lat_spin.blockSignals(False)
         settings_module.save_settings(self.settings)
         self._schedule_preview_update()
+
+    def _on_focal_spin_changed(self, *_a) -> None:
+        """Longitude/latitude typed into the X/Y number inputs - move the
+        dot to match and route through the same focal-change logic as a
+        drag (so mirror vs independent mode is handled identically)."""
+        if self._initializing:
+            return
+        lon = float(self.focal_lon_spin.value())
+        lat = float(self.focal_lat_spin.value())
+        if hasattr(self, "map_focal_preview"):
+            self.map_focal_preview.set_focal(lon, lat)  # visual only, no signal
+        self._on_map_focal_changed(lon, lat)
 
     def _pick_void_fill_color(self) -> None:
         from PySide6.QtWidgets import QColorDialog
@@ -869,13 +890,8 @@ class MainWindow(QMainWindow):
         self.clouds_check.blockSignals(True)
         self.clouds_check.setChecked(s["live_clouds"])
         self.clouds_check.blockSignals(False)
-        self.cloud_opacity_slider.blockSignals(True)
         self.cloud_opacity_slider.setValue(int(s["cloud_opacity"] * 100))
-        self.cloud_opacity_slider.blockSignals(False)
-        self.cloud_density_slider.blockSignals(True)
         self.cloud_density_slider.setValue(int(s.get("cloud_density", 1.0) * 100))
-        self.cloud_density_slider.blockSignals(False)
-        self.cloud_density_value_label.setText(f"{self.cloud_density_slider.value()}%")
         self.night_view_check.blockSignals(True)
         self.night_view_check.setChecked(bool(s.get("night_view", True)))
         self.night_view_check.blockSignals(False)
@@ -891,10 +907,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "map_zoom_slider"):
             from .monitors import monitor_config_for
             cfg = monitor_config_for(s, 0)
-            self.map_zoom_slider.blockSignals(True)
             self.map_zoom_slider.setValue(int(cfg["zoom"] * 100))
-            self.map_zoom_slider.blockSignals(False)
-            self.map_zoom_value_label.setText(f"{self.map_zoom_slider.value()}%")
             if hasattr(self, "map_pos_x_spin"):
                 self.map_pos_x_spin.blockSignals(True)
                 self.map_pos_x_spin.setValue(int(cfg.get("map_pos_x", 0)))
@@ -906,21 +919,21 @@ class MainWindow(QMainWindow):
         if hasattr(self, "map_focal_preview"):
             self.map_focal_preview.set_focal(
                 s.get("center_lon", 0.0), s.get("center_lat", 0.0))
+        if hasattr(self, "focal_lon_spin"):
+            self.focal_lon_spin.blockSignals(True)
+            self.focal_lat_spin.blockSignals(True)
+            self.focal_lon_spin.setValue(int(round(s.get("center_lon", 0.0))))
+            self.focal_lat_spin.setValue(int(round(s.get("center_lat", 0.0))))
+            self.focal_lon_spin.blockSignals(False)
+            self.focal_lat_spin.blockSignals(False)
 
         self.center_lon_spin.blockSignals(True)
         self.center_lon_spin.setValue(int(s["center_lon"]))
         self.center_lon_slider.setValue(int(s["center_lon"]))
         self.center_lon_spin.blockSignals(False)
 
-        self.twilight_slider.blockSignals(True)
         self.twilight_slider.setValue(int(s.get("twilight_width_deg", 7)))
-        self.twilight_slider.blockSignals(False)
-        self.twilight_value_label.setText(f"{self.twilight_slider.value()}°")
-
-        self.night_darkness_slider.blockSignals(True)
         self.night_darkness_slider.setValue(int(s.get("night_darkness", 0.85) * 100))
-        self.night_darkness_slider.blockSignals(False)
-        self.night_darkness_value_label.setText(f"{self.night_darkness_slider.value()}%")
 
         self.temp_units_combo.blockSignals(True)
         units = s.get("temp_units", "C")
@@ -982,7 +995,6 @@ class MainWindow(QMainWindow):
         self.settings["live_clouds"] = self.clouds_check.isChecked()
         self.settings["cloud_opacity"] = self.cloud_opacity_slider.value() / 100
         self.settings["cloud_density"] = self.cloud_density_slider.value() / 100
-        self.cloud_density_value_label.setText(f"{self.cloud_density_slider.value()}%")
         self.settings["night_view"] = self.night_view_check.isChecked()
         if hasattr(self, "start_in_tray_check"):
             self.settings["start_in_tray"] = self.start_in_tray_check.isChecked()
@@ -1002,7 +1014,6 @@ class MainWindow(QMainWindow):
                 self._on_active_monitor_changed(0)
         if hasattr(self, "map_zoom_slider"):
             zoom_pct = self.map_zoom_slider.value()
-            self.map_zoom_value_label.setText(f"{zoom_pct}%")
             # Zoom lives in the currently-edited monitor's config: in
             # independent mode each monitor has its own; in mirror/span
             # monitor 0's config is used for the whole thing.
@@ -1019,9 +1030,7 @@ class MainWindow(QMainWindow):
             self._update_screen_area_preview()
         self.settings["center_lon"] = float(self.center_lon_spin.value())
         self.settings["twilight_width_deg"] = float(self.twilight_slider.value())
-        self.twilight_value_label.setText(f"{self.twilight_slider.value()}°")
         self.settings["night_darkness"] = self.night_darkness_slider.value() / 100
-        self.night_darkness_value_label.setText(f"{self.night_darkness_slider.value()}%")
         self.settings["temp_units"] = self.temp_units_combo.currentData() or "C"
         settings_module.save_settings(self.settings)
         self._restart_timer()

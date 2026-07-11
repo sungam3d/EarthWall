@@ -17,7 +17,6 @@ def _launch_command() -> str:
     """Best-effort command to relaunch the GUI, using the same Python
     interpreter (and therefore the same venv) that's running right now."""
     python = sys.executable
-    module_dir = Path(__file__).resolve().parent.parent
     return f'{python} -m earthwall.gui'
 
 

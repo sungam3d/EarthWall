@@ -5,7 +5,7 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QCheckBox, QColorDialog, QComboBox, QCompleter, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-    QPlainTextEdit, QPushButton, QScrollArea, QSlider, QSpinBox, QTabWidget,
+    QPlainTextEdit, QPushButton, QScrollArea, QSpinBox, QTabWidget,
     QVBoxLayout, QWidget,
 )
 
