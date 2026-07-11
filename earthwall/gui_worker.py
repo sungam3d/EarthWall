@@ -117,6 +117,7 @@ class RenderWorker(QThread):
                 monitor_configs=self.settings.get("monitor_configs"),
                 earthquakes=earthquakes,
                 hurricanes=hurricanes,
+                hazard_style=self.settings.get("hazard_style"),
             )
 
             if self.apply_wallpaper:

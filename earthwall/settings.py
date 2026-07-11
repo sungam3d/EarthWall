@@ -31,6 +31,23 @@ DEFAULTS = {
     "earthquake_min_mag": 4.5,     # only show quakes at/above this magnitude
     "earthquake_period": "week",   # hour | day | week | month
     "show_hurricanes": False,      # active tropical cyclones from NOAA NHC
+    # Display customisation for the hazard overlays (keys match
+    # render.DEFAULT_HAZARD_STYLE; only the ones the GUI exposes are set).
+    "hazard_style": {
+        "eq_shape": "circle",
+        "eq_color_mode": "magnitude",
+        "eq_color": "#FF3B30",
+        "eq_size": 1.0,
+        "eq_show_magnitude": False,
+        "eq_mag_color": "#FFFFFF",
+        "eq_mag_text_size": 1.0,
+        "hur_shape": "spiral",
+        "hur_color_mode": "category",
+        "hur_color": "#E91EA0",
+        "hur_size": 1.0,
+        "hur_show_name": True,
+        "hur_show_track": True,
+    },
     # --- Multi-monitor (Phase 2) ---
     # "mirror"      = same map image on every monitor (default, back-compat)
     # "span"        = one wide image stretched across all monitors as one

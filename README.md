@@ -121,6 +121,12 @@ NASA Blue Marble / Black Marble imagery.
   Both overlays refresh automatically and fail gracefully: if the data
   service is briefly unreachable, the last good data keeps showing and
   the wallpaper render is never held up.
+- **Customisable display** — style both overlays: marker shape
+  (earthquakes: circle / ring / dot / cross; hurricanes: spiral / ring /
+  dot), colour (the built-in magnitude/category ramp or a single custom
+  colour), and size. Earthquakes can optionally **print the magnitude
+  number** next to each marker, with your own text colour and size.
+  Hurricane name labels and forecast tracks can each be toggled on/off.
 
 ### City markers
 

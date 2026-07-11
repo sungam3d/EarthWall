@@ -324,6 +324,56 @@ class MainWindow(QMainWindow):
         eq_legend.setStyleSheet("color:#888; font-size:11px;")
         hazards_layout.addWidget(eq_legend)
 
+        # Earthquake display options
+        eq_style_row = QHBoxLayout()
+        eq_style_row.addWidget(QLabel("Marker:"))
+        self.eq_shape_combo = QComboBox()
+        for label, val in [("Circle", "circle"), ("Ring", "ring"),
+                           ("Dot", "dot"), ("Cross", "cross")]:
+            self.eq_shape_combo.addItem(label, val)
+        self.eq_shape_combo.currentIndexChanged.connect(self._on_hazard_style_changed)
+        eq_style_row.addWidget(self.eq_shape_combo)
+        eq_style_row.addWidget(QLabel("Colour:"))
+        self.eq_color_combo = QComboBox()
+        self.eq_color_combo.addItem("By magnitude", "magnitude")
+        self.eq_color_combo.addItem("Single colour", "custom")
+        self.eq_color_combo.currentIndexChanged.connect(self._on_hazard_style_changed)
+        eq_style_row.addWidget(self.eq_color_combo)
+        self.eq_color_btn = QPushButton()
+        self.eq_color_btn.setFixedWidth(44)
+        self.eq_color_btn.setToolTip("Marker colour (used when 'Single colour' is chosen)")
+        self.eq_color_btn.clicked.connect(lambda: self._pick_hazard_color("eq_color"))
+        eq_style_row.addWidget(self.eq_color_btn)
+        eq_style_row.addWidget(QLabel("Size:"))
+        self.eq_size_spin = QDoubleSpinBox()
+        self.eq_size_spin.setRange(0.3, 4.0)
+        self.eq_size_spin.setSingleStep(0.1)
+        self.eq_size_spin.setValue(1.0)
+        self.eq_size_spin.valueChanged.connect(self._on_hazard_style_changed)
+        eq_style_row.addWidget(self.eq_size_spin)
+        eq_style_row.addStretch()
+        hazards_layout.addLayout(eq_style_row)
+
+        # Magnitude number label + its styling
+        eq_mag_row = QHBoxLayout()
+        self.eq_show_mag_check = QCheckBox("Show magnitude number")
+        self.eq_show_mag_check.toggled.connect(self._on_hazard_style_changed)
+        eq_mag_row.addWidget(self.eq_show_mag_check)
+        eq_mag_row.addWidget(QLabel("Text colour:"))
+        self.eq_mag_color_btn = QPushButton()
+        self.eq_mag_color_btn.setFixedWidth(44)
+        self.eq_mag_color_btn.clicked.connect(lambda: self._pick_hazard_color("eq_mag_color"))
+        eq_mag_row.addWidget(self.eq_mag_color_btn)
+        eq_mag_row.addWidget(QLabel("Text size:"))
+        self.eq_mag_size_spin = QDoubleSpinBox()
+        self.eq_mag_size_spin.setRange(0.5, 4.0)
+        self.eq_mag_size_spin.setSingleStep(0.1)
+        self.eq_mag_size_spin.setValue(1.0)
+        self.eq_mag_size_spin.valueChanged.connect(self._on_hazard_style_changed)
+        eq_mag_row.addWidget(self.eq_mag_size_spin)
+        eq_mag_row.addStretch()
+        hazards_layout.addLayout(eq_mag_row)
+
         # Hurricanes
         self.hurricanes_check = QCheckBox(
             "Show active hurricanes / tropical cyclones (NOAA NHC)")
@@ -337,6 +387,44 @@ class MainWindow(QMainWindow):
         hur_legend.setWordWrap(True)
         hur_legend.setStyleSheet("color:#888; font-size:11px;")
         hazards_layout.addWidget(hur_legend)
+
+        # Hurricane display options
+        hur_style_row = QHBoxLayout()
+        hur_style_row.addWidget(QLabel("Marker:"))
+        self.hur_shape_combo = QComboBox()
+        for label, val in [("Spiral", "spiral"), ("Ring", "ring"), ("Dot", "dot")]:
+            self.hur_shape_combo.addItem(label, val)
+        self.hur_shape_combo.currentIndexChanged.connect(self._on_hazard_style_changed)
+        hur_style_row.addWidget(self.hur_shape_combo)
+        hur_style_row.addWidget(QLabel("Colour:"))
+        self.hur_color_combo = QComboBox()
+        self.hur_color_combo.addItem("By category", "category")
+        self.hur_color_combo.addItem("Single colour", "custom")
+        self.hur_color_combo.currentIndexChanged.connect(self._on_hazard_style_changed)
+        hur_style_row.addWidget(self.hur_color_combo)
+        self.hur_color_btn = QPushButton()
+        self.hur_color_btn.setFixedWidth(44)
+        self.hur_color_btn.clicked.connect(lambda: self._pick_hazard_color("hur_color"))
+        hur_style_row.addWidget(self.hur_color_btn)
+        hur_style_row.addWidget(QLabel("Size:"))
+        self.hur_size_spin = QDoubleSpinBox()
+        self.hur_size_spin.setRange(0.3, 4.0)
+        self.hur_size_spin.setSingleStep(0.1)
+        self.hur_size_spin.setValue(1.0)
+        self.hur_size_spin.valueChanged.connect(self._on_hazard_style_changed)
+        hur_style_row.addWidget(self.hur_size_spin)
+        hur_style_row.addStretch()
+        hazards_layout.addLayout(hur_style_row)
+
+        hur_toggle_row = QHBoxLayout()
+        self.hur_show_name_check = QCheckBox("Show storm name")
+        self.hur_show_name_check.toggled.connect(self._on_hazard_style_changed)
+        hur_toggle_row.addWidget(self.hur_show_name_check)
+        self.hur_show_track_check = QCheckBox("Show forecast track")
+        self.hur_show_track_check.toggled.connect(self._on_hazard_style_changed)
+        hur_toggle_row.addWidget(self.hur_show_track_check)
+        hur_toggle_row.addStretch()
+        hazards_layout.addLayout(hur_toggle_row)
 
         layout.addWidget(hazards_box)
 
@@ -880,6 +968,90 @@ class MainWindow(QMainWindow):
         except Exception:
             self._raw_map_thumb = None
 
+    def _hazard_style(self) -> dict:
+        """Current hazard_style dict from settings, filled with defaults."""
+        from .render import DEFAULT_HAZARD_STYLE
+        st = dict(DEFAULT_HAZARD_STYLE)
+        st.update(self.settings.get("hazard_style") or {})
+        return st
+
+    def _on_hazard_style_changed(self, *_a) -> None:
+        """Any earthquake/hurricane display-option widget changed - gather
+        them all into settings['hazard_style'] and re-render."""
+        if self._initializing:
+            return
+        st = self._hazard_style()
+        st["eq_shape"] = self.eq_shape_combo.currentData() or "circle"
+        st["eq_color_mode"] = self.eq_color_combo.currentData() or "magnitude"
+        st["eq_size"] = float(self.eq_size_spin.value())
+        st["eq_show_magnitude"] = self.eq_show_mag_check.isChecked()
+        st["eq_mag_text_size"] = float(self.eq_mag_size_spin.value())
+        st["hur_shape"] = self.hur_shape_combo.currentData() or "spiral"
+        st["hur_color_mode"] = self.hur_color_combo.currentData() or "category"
+        st["hur_size"] = float(self.hur_size_spin.value())
+        st["hur_show_name"] = self.hur_show_name_check.isChecked()
+        st["hur_show_track"] = self.hur_show_track_check.isChecked()
+        self.settings["hazard_style"] = st
+        settings_module.save_settings(self.settings)
+        self._schedule_preview_update()
+
+    def _pick_hazard_color(self, key: str) -> None:
+        """Colour picker for a hazard_style colour key (eq_color,
+        eq_mag_color, hur_color)."""
+        from PySide6.QtWidgets import QColorDialog
+        st = self._hazard_style()
+        current = QColor(st.get(key, "#FFFFFF"))
+        chosen = QColorDialog.getColor(current, self, "Choose colour")
+        if chosen.isValid():
+            st[key] = chosen.name()
+            self.settings["hazard_style"] = st
+            settings_module.save_settings(self.settings)
+            self._refresh_hazard_swatches()
+            self._schedule_preview_update()
+
+    def _refresh_hazard_swatches(self) -> None:
+        st = self._hazard_style()
+        for key, btn in (("eq_color", getattr(self, "eq_color_btn", None)),
+                         ("eq_mag_color", getattr(self, "eq_mag_color_btn", None)),
+                         ("hur_color", getattr(self, "hur_color_btn", None))):
+            if btn is not None:
+                btn.setStyleSheet(
+                    f"background-color: {st.get(key, '#FFFFFF')}; "
+                    "border: 1px solid #666;")
+
+    def _load_hazard_style_widgets(self) -> None:
+        """Populate the hazard display-option widgets from settings."""
+        if not hasattr(self, "eq_shape_combo"):
+            return
+        st = self._hazard_style()
+
+        def _set_combo(combo, data):
+            for i in range(combo.count()):
+                if combo.itemData(i) == data:
+                    combo.setCurrentIndex(i); return
+
+        for wdt in (self.eq_shape_combo, self.eq_color_combo, self.eq_size_spin,
+                    self.eq_show_mag_check, self.eq_mag_size_spin,
+                    self.hur_shape_combo, self.hur_color_combo, self.hur_size_spin,
+                    self.hur_show_name_check, self.hur_show_track_check):
+            wdt.blockSignals(True)
+        _set_combo(self.eq_shape_combo, st.get("eq_shape", "circle"))
+        _set_combo(self.eq_color_combo, st.get("eq_color_mode", "magnitude"))
+        self.eq_size_spin.setValue(float(st.get("eq_size", 1.0)))
+        self.eq_show_mag_check.setChecked(bool(st.get("eq_show_magnitude", False)))
+        self.eq_mag_size_spin.setValue(float(st.get("eq_mag_text_size", 1.0)))
+        _set_combo(self.hur_shape_combo, st.get("hur_shape", "spiral"))
+        _set_combo(self.hur_color_combo, st.get("hur_color_mode", "category"))
+        self.hur_size_spin.setValue(float(st.get("hur_size", 1.0)))
+        self.hur_show_name_check.setChecked(bool(st.get("hur_show_name", True)))
+        self.hur_show_track_check.setChecked(bool(st.get("hur_show_track", True)))
+        for wdt in (self.eq_shape_combo, self.eq_color_combo, self.eq_size_spin,
+                    self.eq_show_mag_check, self.eq_mag_size_spin,
+                    self.hur_shape_combo, self.hur_color_combo, self.hur_size_spin,
+                    self.hur_show_name_check, self.hur_show_track_check):
+            wdt.blockSignals(False)
+        self._refresh_hazard_swatches()
+
     def _refresh_void_fill_swatch(self) -> None:
         from .monitors import monitor_config_for
         cfg = monitor_config_for(self.settings, self._active_monitor_index())
@@ -1002,6 +1174,7 @@ class MainWindow(QMainWindow):
             self.hurricanes_check.blockSignals(True)
             self.hurricanes_check.setChecked(bool(s.get("show_hurricanes", False)))
             self.hurricanes_check.blockSignals(False)
+            self._load_hazard_style_widgets()
 
         # --- Multi-monitor / Displays tab ---
         if hasattr(self, "monitors_mode_combo"):

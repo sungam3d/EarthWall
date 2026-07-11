@@ -179,18 +179,14 @@ def _apply_clouds(base: Image.Image, cloud_layer: Image.Image, center_lon: float
 
 
 def _draw_hazards(img: Image.Image, center_lon: float,
-                  earthquakes: list | None, hurricanes: list | None) -> Image.Image:
+                  earthquakes: list | None, hurricanes: list | None,
+                  style: dict | None = None) -> Image.Image:
     """Draw earthquake and tropical-cyclone overlays on the map.
 
-    Earthquakes: a translucent filled circle whose radius scales with
-    magnitude and whose colour ramps yellow->orange->red->magenta with
-    strength, plus a thin outline so small quakes stay visible over busy
-    terrain. Larger quakes draw on top (the caller pre-sorts strongest-
-    first, so we draw in reverse to keep big ones uppermost).
-
-    Hurricanes: the storm's forecast/best track as a polyline (if we have
-    the geometry), then a spiral cyclone glyph at the current centre
-    sized/coloured by category, with the storm name beside it.
+    `style` is an optional dict of display preferences (see the defaults
+    in DEFAULT_HAZARD_STYLE). It controls marker shape, colour mode,
+    size, and - for earthquakes - whether to print the magnitude number
+    beside each marker and how to style that number.
 
     Both overlays are optional; passing None or an empty list draws
     nothing for that layer. Everything is wrapped so a malformed record
@@ -198,34 +194,121 @@ def _draw_hazards(img: Image.Image, center_lon: float,
     if not earthquakes and not hurricanes:
         return img
 
+    st = dict(DEFAULT_HAZARD_STYLE)
+    if style:
+        st.update(style)
+
     w, h = img.size
     overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
 
     # ---- Earthquakes (weakest first so strongest end up on top) ----
+    eq_size_mult = float(st.get("eq_size", 1.0))
+    eq_shape = st.get("eq_shape", "circle")
+    eq_color_mode = st.get("eq_color_mode", "magnitude")
+    eq_custom = _hex_rgba(st.get("eq_color", "#FF3B30"), 190)
+    eq_show_mag = bool(st.get("eq_show_magnitude", False))
+    eq_mag_color = _hex_rgba(st.get("eq_mag_color", "#FFFFFF"), 255)
+    eq_mag_size = float(st.get("eq_mag_text_size", 1.0))
+
     for q in reversed(earthquakes or []):
         try:
             mag = q.get("mag", 0.0)
             x, y = _lonlat_to_xy(q["lon"], q["lat"], w, h, center_lon)
-            # Radius grows with magnitude; scaled to image width so it's
-            # sensible at any resolution. ~M2 tiny, ~M8 prominent.
             base = max(2.0, w / 900.0)
-            r = int(base * (1.4 ** max(0.0, mag)))
-            r = max(2, min(r, int(w / 18)))  # clamp so a big quake isn't absurd
-            color = _quake_color(mag)
-            draw.ellipse([x - r, y - r, x + r, y + r],
-                         fill=color, outline=(20, 20, 20, 200), width=1)
+            r = int(base * (1.4 ** max(0.0, mag)) * eq_size_mult)
+            r = max(2, min(r, int(w / 12)))
+            color = eq_custom if eq_color_mode == "custom" else _quake_color(mag)
+            _draw_marker(draw, eq_shape, x, y, r, color,
+                         outline=(20, 20, 20, 200))
+            if eq_show_mag:
+                _draw_hazard_label(
+                    draw, f"{mag:.1f}", x + r + max(2, r // 3), y - r,
+                    fill=eq_mag_color,
+                    size=max(10, int((w / 150) * eq_mag_size)))
         except Exception:
             continue
 
     # ---- Hurricanes ----
+    hur_size_mult = float(st.get("hur_size", 1.0))
+    hur_shape = st.get("hur_shape", "spiral")
+    hur_color_mode = st.get("hur_color_mode", "category")
+    hur_custom = _hex_rgba(st.get("hur_color", "#E91EA0"), 245)
+    hur_show_name = bool(st.get("hur_show_name", True))
+    hur_show_track = bool(st.get("hur_show_track", True))
+
     for s in (hurricanes or []):
         try:
-            _draw_one_storm(draw, s, w, h, center_lon)
+            _draw_one_storm(draw, s, w, h, center_lon,
+                            size_mult=hur_size_mult, shape=hur_shape,
+                            color_mode=hur_color_mode, custom_color=hur_custom,
+                            show_name=hur_show_name, show_track=hur_show_track)
         except Exception:
             continue
 
     return Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
+
+
+# Default display preferences for the hazard overlays. The GUI writes a
+# subset of these into settings["hazard_style"]; missing keys fall back
+# here so older settings files keep working.
+DEFAULT_HAZARD_STYLE = {
+    # Earthquakes
+    "eq_shape": "circle",         # circle | ring | dot | cross
+    "eq_color_mode": "magnitude", # magnitude (ramp) | custom
+    "eq_color": "#FF3B30",        # used when eq_color_mode == custom
+    "eq_size": 1.0,               # marker size multiplier
+    "eq_show_magnitude": False,   # print the magnitude number by each quake
+    "eq_mag_color": "#FFFFFF",
+    "eq_mag_text_size": 1.0,
+    # Hurricanes
+    "hur_shape": "spiral",        # spiral | ring | dot
+    "hur_color_mode": "category", # category (ramp) | custom
+    "hur_color": "#E91EA0",
+    "hur_size": 1.0,
+    "hur_show_name": True,
+    "hur_show_track": True,
+}
+
+
+def _hex_rgba(hex_color: str, alpha: int) -> tuple:
+    """Convert '#RRGGBB' to an (r, g, b, alpha) tuple; safe on bad input."""
+    try:
+        c = ImageColor.getrgb(hex_color)
+        return (c[0], c[1], c[2], alpha)
+    except Exception:
+        return (255, 59, 48, alpha)
+
+
+def _draw_marker(draw: "ImageDraw.ImageDraw", shape: str, x: int, y: int,
+                 r: int, color: tuple, outline: tuple) -> None:
+    """Draw one hazard marker in the requested shape."""
+    if shape == "dot":
+        rr = max(2, r // 2)
+        draw.ellipse([x - rr, y - rr, x + rr, y + rr], fill=color)
+    elif shape == "ring":
+        draw.ellipse([x - r, y - r, x + r, y + r], outline=color,
+                     width=max(2, r // 3))
+    elif shape == "cross":
+        wdt = max(2, r // 3)
+        draw.line([x - r, y, x + r, y], fill=color, width=wdt)
+        draw.line([x, y - r, x, y + r], fill=color, width=wdt)
+    else:  # circle (default)
+        draw.ellipse([x - r, y - r, x + r, y + r], fill=color,
+                     outline=outline, width=1)
+
+
+def _draw_hazard_label(draw: "ImageDraw.ImageDraw", text: str, x: int, y: int,
+                       fill: tuple, size: int) -> None:
+    """Draw a small label with a dark outline for readability over any
+    terrain (used for the earthquake magnitude number and storm names)."""
+    try:
+        font = _load_font(size)
+    except Exception:
+        return
+    for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+        draw.text((x + dx, y + dy), text, font=font, fill=(0, 0, 0, 210))
+    draw.text((x, y), text, font=font, fill=fill)
 
 
 def _quake_color(mag: float) -> tuple:
@@ -254,13 +337,17 @@ _CYCLONE_COLORS = {
 
 
 def _draw_one_storm(draw: ImageDraw.ImageDraw, storm: dict, w: int, h: int,
-                    center_lon: float) -> None:
+                    center_lon: float, size_mult: float = 1.0,
+                    shape: str = "spiral", color_mode: str = "category",
+                    custom_color: tuple = (233, 30, 160, 250),
+                    show_name: bool = True, show_track: bool = True) -> None:
     rank = storm.get("cat_rank", 0)
-    color = _CYCLONE_COLORS.get(rank, (200, 200, 200, 235))
+    color = (custom_color if color_mode == "custom"
+             else _CYCLONE_COLORS.get(rank, (200, 200, 200, 235)))
 
     # Track polyline first, so the glyph sits on top of it.
     track = storm.get("_track_points") or []
-    if len(track) >= 2:
+    if show_track and len(track) >= 2:
         pts = [_lonlat_to_xy(lon, lat, w, h, center_lon) for lon, lat in track]
         # Break the line where it wraps the antimeridian to avoid a long
         # horizontal streak across the whole map.
@@ -276,29 +363,29 @@ def _draw_one_storm(draw: ImageDraw.ImageDraw, storm: dict, w: int, h: int,
             draw.line(seg, fill=(255, 255, 255, 150), width=max(1, w // 1400))
 
     cx, cy = _lonlat_to_xy(storm["lon"], storm["lat"], w, h, center_lon)
-    r = max(6, int(w / 130) + rank * max(2, w // 900))
+    r = max(6, int((w / 130) + rank * max(2, w // 900)) * size_mult)
 
-    # Cyclone glyph: two curved "arms" (approximated by arcs) plus an eye,
-    # evoking the classic spiral without needing a bitmap.
-    bbox = [cx - r, cy - r, cx + r, cy + r]
-    draw.arc(bbox, start=20, end=200, fill=color, width=max(2, r // 4))
-    draw.arc(bbox, start=200, end=380, fill=color, width=max(2, r // 4))
-    eye = max(2, r // 3)
-    draw.ellipse([cx - eye, cy - eye, cx + eye, cy + eye],
-                 fill=color, outline=(255, 255, 255, 230), width=1)
+    if shape == "dot":
+        rr = max(3, r // 2)
+        draw.ellipse([cx - rr, cy - rr, cx + rr, cy + rr], fill=color)
+    elif shape == "ring":
+        draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=color,
+                     width=max(2, r // 4))
+    else:  # spiral (default): two curved arms + an eye
+        bbox = [cx - r, cy - r, cx + r, cy + r]
+        draw.arc(bbox, start=20, end=200, fill=color, width=max(2, r // 4))
+        draw.arc(bbox, start=200, end=380, fill=color, width=max(2, r // 4))
+        eye = max(2, r // 3)
+        draw.ellipse([cx - eye, cy - eye, cx + eye, cy + eye],
+                     fill=color, outline=(255, 255, 255, 230), width=1)
 
     # Name + category label beside the glyph.
-    label = f"{storm.get('name', '')} ({storm.get('category', '?')})".strip()
-    if label:
-        try:
-            font = _load_font(max(11, int(w / 130)))
-            tx, ty = cx + r + 4, cy - r
-            # Cheap readability: dark outline behind the text.
-            for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-                draw.text((tx + dx, ty + dy), label, font=font, fill=(0, 0, 0, 200))
-            draw.text((tx, ty), label, font=font, fill=(255, 255, 255, 240))
-        except Exception:
-            pass
+    if show_name:
+        label = f"{storm.get('name', '')} ({storm.get('category', '?')})".strip()
+        if label:
+            _draw_hazard_label(draw, label, cx + r + 4, cy - r,
+                               fill=(255, 255, 255, 240),
+                               size=max(11, int(w / 130)))
 
 
 def _lonlat_to_xy(lon: float, lat: float, width: int, height: int, center_lon: float) -> tuple[int, int]:
@@ -747,7 +834,8 @@ def _render_map_image(width: int, height: int, cities: list[dict],
                        night_view: bool, temp_units: str,
                        weather_by_city: dict | None,
                        earthquakes: list | None = None,
-                       hurricanes: list | None = None) -> Image.Image:
+                       hurricanes: list | None = None,
+                       hazard_style: dict | None = None) -> Image.Image:
     """Produce a single (width x height) map image with day/night,
     clouds, hazard overlays, and city markers all applied. Extracted from
     render() so the independent multi-monitor branch can call it once per
@@ -775,7 +863,8 @@ def _render_map_image(width: int, height: int, cities: list[dict],
     # Hazard overlays sit above clouds (so a quake isn't hidden under an
     # opaque cloud) but below city markers (so your labelled cities stay
     # legible on top).
-    composite = _draw_hazards(composite, center_lon, earthquakes, hurricanes)
+    composite = _draw_hazards(composite, center_lon, earthquakes, hurricanes,
+                              hazard_style)
 
     composite = _draw_city_markers(composite, cities, when.astimezone(),
                                     center_lon, temp_units=temp_units,
@@ -792,7 +881,8 @@ def _render_monitor_view(monitor, monitor_config: dict, global_center_lon: float
                           night_view: bool, temp_units: str,
                           weather_by_city: dict | None,
                           earthquakes: list | None = None,
-                          hurricanes: list | None = None) -> Image.Image:
+                          hurricanes: list | None = None,
+                          hazard_style: dict | None = None) -> Image.Image:
     """Render a single monitor's view in "independent" mode, sized to
     that monitor's exact pixel dimensions.
 
@@ -818,7 +908,7 @@ def _render_monitor_view(monitor, monitor_config: dict, global_center_lon: float
                              map_id, m_lon, twilight_width_deg, night_darkness,
                              cloud_layer, cloud_opacity, cloud_density,
                              night_view, temp_units, weather_by_city,
-                             earthquakes, hurricanes)
+                             earthquakes, hurricanes, hazard_style)
 
     if zoom > 1.0:
         # Centre-crop to monitor size; latitude focal shifts the crop
@@ -872,7 +962,8 @@ def render(output_path: str | Path, width: int, height: int,
            monitor_configs: dict | None = None,
            # --- Hazard overlays ---
            earthquakes: list | None = None,
-           hurricanes: list | None = None) -> None:
+           hurricanes: list | None = None,
+           hazard_style: dict | None = None) -> None:
     """Render one wallpaper frame and save it to `output_path`.
 
     Modes:
@@ -912,7 +1003,7 @@ def render(output_path: str | Path, width: int, height: int,
                 m, cfg, center_lon, center_lat, cities, when, sub_lat, sub_lon,
                 map_id, twilight_width_deg, night_darkness, cloud_layer,
                 cloud_opacity, cloud_density, night_view, temp_units,
-                weather_by_city, earthquakes, hurricanes,
+                weather_by_city, earthquakes, hurricanes, hazard_style,
             )
             lx, ly, _, _ = monitor_layout.local_rect(m)
             canvas.paste(mon_img, (lx, ly))
@@ -934,7 +1025,7 @@ def render(output_path: str | Path, width: int, height: int,
             map_w, map_h, cities, when, sub_lat, sub_lon, map_id, center_lon,
             twilight_width_deg, night_darkness, cloud_layer, cloud_opacity,
             cloud_density, night_view, temp_units, weather_by_city,
-            earthquakes, hurricanes,
+            earthquakes, hurricanes, hazard_style,
         )
         composite = _compose_multi_monitor(
             map_img, virtual_w, virtual_h, map_w, map_h, map_x, map_y,
@@ -947,7 +1038,7 @@ def render(output_path: str | Path, width: int, height: int,
             width, height, cities, when, sub_lat, sub_lon, map_id, center_lon,
             twilight_width_deg, night_darkness, cloud_layer, cloud_opacity,
             cloud_density, night_view, temp_units, weather_by_city,
-            earthquakes, hurricanes,
+            earthquakes, hurricanes, hazard_style,
         )
 
     output_path = Path(output_path)
