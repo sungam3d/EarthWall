@@ -933,6 +933,20 @@ def _render_monitor_view(monitor, monitor_config: dict, global_center_lon: float
     return img
 
 
+class _ScaledMonitor:
+    """Wraps a Monitor with proportionally-scaled dimensions, so a low-
+    resolution preview can render each monitor's independent view at a
+    matching low-res size without touching the real Monitor object."""
+    __slots__ = ("_m", "width", "height")
+    def __init__(self, m, sx: float, sy: float):
+        self._m = m
+        self.width = max(1, int(round(m.width * sx)))
+        self.height = max(1, int(round(m.height * sy)))
+    # Delegate everything else to the underlying monitor.
+    def __getattr__(self, name):
+        return getattr(self._m, name)
+
+
 def render(output_path: str | Path, width: int, height: int,
            cities: list[dict], when: datetime | None = None,
            map_id: str = "blue_marble_july", center_lon: float = 0.0,
@@ -989,37 +1003,44 @@ def render(output_path: str | Path, width: int, height: int,
 
     # ---- Independent mode: render each monitor separately ----
     if is_independent:
-        virtual_w = monitor_layout.virtual_width
-        virtual_h = monitor_layout.virtual_height
-        # Base canvas with the *global* void fill for gaps between
-        # monitors (diagonal layouts). Individual monitors may override
-        # their own void fill via their monitor_config.
+        # Scale monitor rects to fit the requested output size (usually
+        # matches the virtual desktop, but for the low-res preview it
+        # doesn't - and rendering the full virtual desktop for every
+        # preview tick would be needlessly slow).
+        scale_x = width / max(1, monitor_layout.virtual_width)
+        scale_y = height / max(1, monitor_layout.virtual_height)
+        virtual_w, virtual_h = width, height
         canvas = _load_void_fill(void_fill_color, void_fill_image,
                                    (virtual_w, virtual_h))
         cfgs = monitor_configs or {}
         for m in monitor_layout.monitors:
             cfg = cfgs.get(str(m.index), {})
+            # Scale each monitor's rendered image proportionally.
+            scaled_m = _ScaledMonitor(m, scale_x, scale_y)
             mon_img = _render_monitor_view(
-                m, cfg, center_lon, center_lat, cities, when, sub_lat, sub_lon,
+                scaled_m, cfg, center_lon, center_lat, cities, when, sub_lat, sub_lon,
                 map_id, twilight_width_deg, night_darkness, cloud_layer,
                 cloud_opacity, cloud_density, night_view, temp_units,
                 weather_by_city, earthquakes, hurricanes, hazard_style,
             )
-            lx, ly, _, _ = monitor_layout.local_rect(m)
+            lx = int(round((m.x - monitor_layout.virtual_x) * scale_x))
+            ly = int(round((m.y - monitor_layout.virtual_y) * scale_y))
             canvas.paste(mon_img, (lx, ly))
         composite = canvas
 
     # ---- Span mode: one map across the whole virtual desktop ----
     elif is_span:
-        virtual_w = monitor_layout.virtual_width
-        virtual_h = monitor_layout.virtual_height
+        # Render at the CALLER's requested size (width, height), not the
+        # layout's virtual size. The layout's job here is to give us the
+        # semantics (single-image span vs per-monitor, and the aspect
+        # ratio to render at); the actual pixel dimensions come from the
+        # caller so previews stay small/fast and full renders stay full-
+        # sized. Position offsets are fractions of the output, so the
+        # same offset produces a proportionally identical result at
+        # every resolution.
+        virtual_w, virtual_h = width, height
         map_w = max(1, int(round(virtual_w * map_zoom)))
         map_h = max(1, int(round(virtual_h * map_zoom)))
-        # map_pos_x / map_pos_y are FRACTIONS of the virtual desktop
-        # (-1.0..1.0), not absolute pixels, so the same offset produces
-        # the same visual result at preview resolution and at full
-        # wallpaper resolution. The GUI converts its pixel spinboxes to
-        # fractions (relative to the primary monitor) before saving.
         if map_pos_x != 0 or map_pos_y != 0:
             map_x = int(round(map_pos_x * virtual_w))
             map_y = int(round(map_pos_y * virtual_h))
