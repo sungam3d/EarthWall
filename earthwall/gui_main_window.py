@@ -831,37 +831,61 @@ class MainWindow(QMainWindow):
         """Recompute the red-outlined map-area rect from current settings
         and push it into the preview.
 
-        The map-area rectangle must match what the renderer actually does:
-        map_size = virtual_desktop * zoom. So zoom > 1 makes the map
-        LARGER than the desktop (it spills off the edges, no void); zoom
-        < 1 makes it SMALLER (void appears around it). An earlier version
-        divided by zoom instead of multiplying, which inverted this - at
-        50% the red box grew to twice desktop width, producing the very
-        wide, short rectangle that didn't fit the monitor."""
+        The map-area rectangle must match what the renderer actually
+        draws, and the renderer treats the three modes differently:
+
+        - **Mirror / Custom** — the map fills the (single) monitor at
+          `zoom` scaling. Zoom > 1 spills off the edges, zoom < 1 leaves
+          void inside.
+        - **Stretch** — the map is drawn at its NATURAL 2:1 aspect,
+          fitted into the virtual desktop with void bars around the
+          leftover space. This is the "don't squash the world across
+          three wide monitors" fix from the render.py span branch; the
+          edit widget mirrors it so the red map rectangle here always
+          lines up with what the wallpaper actually produces.
+        """
         layout = getattr(self, "_current_layout", None)
         if layout is None:
             return
         idx = self._active_monitor_index()
         cfg = (self.settings.get("monitor_configs") or {}).get(str(idx), {})
         zoom = self.map_zoom_slider.value() / 100.0
-        vw, vh = layout.virtual_width, layout.virtual_height
-        aw = max(1, int(round(vw * zoom)))
-        ah = max(1, int(round(vh * zoom)))
-        # Position spinboxes hold PIXELS relative to the render
-        # resolution; the renderer treats them as a fraction of the
-        # virtual desktop. Mirror that here so the red box in this
-        # preview lands exactly where the wallpaper will: convert the
-        # pixel value to a fraction against the render resolution, then
-        # back to this preview layout's pixel space.
+        mode = self.settings.get("monitors_mode", "mirror")
+        # The screen-area preview widget was filtered per mode
+        # (_screen_area_layout), so its layout is either just the primary
+        # (mirror), just the selected monitor (custom), or the full
+        # virtual desktop (stretch). Use the widget's layout for the
+        # geometry so it always matches what's actually shown.
+        preview_layout = self.screen_area_preview._layout or layout
+        vw = preview_layout.virtual_width
+        vh = preview_layout.virtual_height
+        if mode == "span":
+            # Fit the map at 2:1 into the virtual desktop, then apply
+            # zoom on top - matches render.py span branch exactly.
+            fit_w = min(vw, vh * 2)
+            fit_h = fit_w // 2
+            aw = max(1, int(round(fit_w * zoom)))
+            ah = max(1, int(round(fit_h * zoom)))
+        else:
+            # Mirror / custom: map fills the monitor rect at `zoom`.
+            aw = max(1, int(round(vw * zoom)))
+            ah = max(1, int(round(vh * zoom)))
         pos_x_px = int(cfg.get("map_pos_x", 0))
         pos_y_px = int(cfg.get("map_pos_y", 0))
         if pos_x_px != 0 or pos_y_px != 0:
             ref_w, ref_h = self._current_resolution()
-            ax = layout.virtual_x + int(round(pos_x_px / max(1, ref_w) * vw))
-            ay = layout.virtual_y + int(round(pos_y_px / max(1, ref_h) * vh))
+            if mode == "span":
+                # Same centred-then-offset semantics as render.py span.
+                ax = (preview_layout.virtual_x + (vw - aw) // 2
+                      + int(round(pos_x_px / max(1, ref_w) * vw)))
+                ay = (preview_layout.virtual_y + (vh - ah) // 2
+                      + int(round(pos_y_px / max(1, ref_h) * vh)))
+            else:
+                ax = preview_layout.virtual_x + int(round(pos_x_px / max(1, ref_w) * vw))
+                ay = preview_layout.virtual_y + int(round(pos_y_px / max(1, ref_h) * vh))
         else:
-            ax = layout.virtual_x + (vw - aw) // 2
-            ay = layout.virtual_y + (vh - ah) // 2
+            ax = preview_layout.virtual_x + (vw - aw) // 2
+            ay = preview_layout.virtual_y + (vh - ah) // 2
         self.screen_area_preview.set_map_area((ax, ay, aw, ah))
         # Feed the RAW map image (plain equirectangular day map) as the
         # red-box thumbnail - NOT the composited wallpaper render. The red
