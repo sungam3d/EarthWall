@@ -979,9 +979,10 @@ def _apply_monitor_overlay(img: Image.Image, layout, out_w: int, out_h: int) -> 
         rects.append((lx, ly, lx + rw, ly + rh))
         mdraw.rectangle([lx, ly, lx + rw - 1, ly + rh - 1], fill=255)
 
-    # 2. Build a darkened copy of the image. Compose original + dark
-    #    version using the mask so monitor areas stay bright.
-    darkened = Image.eval(img.convert("RGB"), lambda v: v // 3)
+    # 2. Build a much dimmer copy of the image. Compose original + dim
+    #    version using the mask so monitor areas stay bright and the
+    #    out-of-bounds areas become clearly-inactive at a glance.
+    darkened = Image.eval(img.convert("RGB"), lambda v: v // 6)
     composited = Image.composite(img.convert("RGB"), darkened, mask)
 
     # 3. Draw a soft outline around every monitor so the user can see the
@@ -1106,12 +1107,23 @@ def render(output_path: str | Path, width: int, height: int,
         # sized. Position offsets are fractions of the output, so the
         # same offset produces a proportionally identical result at
         # every resolution.
+        #
+        # The MAP itself is drawn at its natural 2:1 equirectangular
+        # aspect ratio - stretching it to fit an odd virtual-desktop
+        # aspect (very wide multi-monitor setups, portrait orientations)
+        # would squash the world. Instead, at zoom 1.0 we fit the map
+        # into the desktop preserving 2:1, and any leftover area is
+        # filled with the void colour/image. Zoom scales from there:
+        # zoom > 1 makes the map larger than that fit (spills off the
+        # edges), zoom < 1 makes it smaller (more void showing).
         virtual_w, virtual_h = width, height
-        map_w = max(1, int(round(virtual_w * map_zoom)))
-        map_h = max(1, int(round(virtual_h * map_zoom)))
+        fit_w = min(virtual_w, virtual_h * 2)
+        fit_h = fit_w // 2
+        map_w = max(1, int(round(fit_w * map_zoom)))
+        map_h = max(1, int(round(fit_h * map_zoom)))
         if map_pos_x != 0 or map_pos_y != 0:
-            map_x = int(round(map_pos_x * virtual_w))
-            map_y = int(round(map_pos_y * virtual_h))
+            map_x = int(round(map_pos_x * virtual_w)) + (virtual_w - map_w) // 2
+            map_y = int(round(map_pos_y * virtual_h)) + (virtual_h - map_h) // 2
         else:
             map_x = (virtual_w - map_w) // 2
             map_y = (virtual_h - map_h) // 2 + int(round(center_lat / 90.0 * map_h / 2))

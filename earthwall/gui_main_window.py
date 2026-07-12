@@ -93,6 +93,7 @@ class MainWindow(QMainWindow):
         self._refresh_city_table()
         self._restart_timer()
         self._initializing = False
+        self._refresh_focal_target_label()
 
         # Kick off a first render shortly after launch.
         QTimer.singleShot(500, self.trigger_update)
@@ -504,6 +505,16 @@ class MainWindow(QMainWindow):
         self.map_focal_preview.focal_changed.connect(self._on_map_focal_changed)
         center_layout.addWidget(self.map_focal_preview)
 
+        # Small caption below the map showing WHICH map centre this
+        # widget is editing right now. In mirror/stretch modes it's
+        # global; in custom mode it's whichever monitor is currently
+        # selected in the Displays-tab "Editing monitor" dropdown - so
+        # the user isn't left guessing whose centre they just moved.
+        self.map_focal_target_label = QLabel("")
+        self.map_focal_target_label.setStyleSheet("color:#888; font-size:11px;")
+        self.map_focal_target_label.setAlignment(Qt.AlignCenter)
+        center_layout.addWidget(self.map_focal_target_label)
+
         # Exact numeric entry for the dot's position, for users who want
         # to type a precise longitude/latitude rather than drag. Kept in
         # sync with the dot both ways: dragging updates these, editing
@@ -720,28 +731,35 @@ class MainWindow(QMainWindow):
         # These live alongside the zoom slider: zoom sizes the map, X/Y
         # positions it within the virtual desktop. Both are stored on
         # monitor #0's config (mapped to "spanned map" in span mode).
-        # Advanced users can pin exact numbers; casual users can ignore
-        # them and just drag the focal dot / move the zoom slider.
-        placement_row = QHBoxLayout()
-        placement_row.addWidget(QLabel("Map position X:"))
-        self.map_pos_x_spin = QSpinBox()
-        self.map_pos_x_spin.setRange(-30000, 30000)
-        self.map_pos_x_spin.setSuffix(" px")
+        # LabeledSlider pairs a slider with a synced number box, so users
+        # can drag to a rough offset or type an exact pixel value.
+        # Range +/-3000px covers most 4K setups and matches the pixel
+        # semantics used elsewhere (converted to a fraction at render
+        # time, so this pixel range remains meaningful regardless of the
+        # real monitor size).
+        pos_x_row = QHBoxLayout()
+        pos_x_row.addWidget(QLabel("Map position X:"))
+        self.map_pos_x_spin = LabeledSlider(-3000, 3000, suffix=" px")
         self.map_pos_x_spin.valueChanged.connect(self._on_settings_changed)
-        placement_row.addWidget(self.map_pos_x_spin)
-        placement_row.addWidget(QLabel("Y:"))
-        self.map_pos_y_spin = QSpinBox()
-        self.map_pos_y_spin.setRange(-30000, 30000)
-        self.map_pos_y_spin.setSuffix(" px")
+        pos_x_row.addWidget(self.map_pos_x_spin, stretch=1)
+        map_area_layout.addLayout(pos_x_row)
+
+        pos_y_row = QHBoxLayout()
+        pos_y_row.addWidget(QLabel("Map position Y:"))
+        self.map_pos_y_spin = LabeledSlider(-3000, 3000, suffix=" px")
         self.map_pos_y_spin.valueChanged.connect(self._on_settings_changed)
-        placement_row.addWidget(self.map_pos_y_spin)
+        pos_y_row.addWidget(self.map_pos_y_spin, stretch=1)
+        map_area_layout.addLayout(pos_y_row)
+
+        # Auto-center + short helper text sit together beneath the sliders.
+        pos_util_row = QHBoxLayout()
         self.map_pos_auto_btn = QPushButton("Auto-center")
         self.map_pos_auto_btn.setToolTip(
             "Reset X/Y so the map is centred on the virtual desktop")
         self.map_pos_auto_btn.clicked.connect(self._auto_center_map_position)
-        placement_row.addWidget(self.map_pos_auto_btn)
-        placement_row.addStretch()
-        map_area_layout.addLayout(placement_row)
+        pos_util_row.addWidget(self.map_pos_auto_btn)
+        pos_util_row.addStretch()
+        map_area_layout.addLayout(pos_util_row)
 
         outer.addWidget(map_area_box)
         outer.addStretch()
@@ -772,9 +790,42 @@ class MainWindow(QMainWindow):
             f"virtual desktop {layout.virtual_width}×{layout.virtual_height}.\n"
             + "\n".join(parts)
         )
-        self.screen_area_preview.set_layout(layout)
+        self.screen_area_preview.set_layout(self._screen_area_layout(layout))
         self._update_screen_area_preview()
         self._rebuild_monitor_editor_combo()
+
+    def _screen_area_layout(self, full_layout):
+        """Return the layout the Screen Area preview should DISPLAY,
+        which depends on the current mode:
+
+        - **Mirror** — only show the primary monitor. The wallpaper is
+          duplicated by the DE to all attached monitors, so the preview
+          is clearest and least misleading when it shows just the
+          primary.
+        - **Custom (independent)** — only show the monitor the user
+          currently has selected in the "Editing monitor" dropdown. In
+          this mode the user edits each monitor separately, so the
+          preview should focus on the one they're editing right now.
+        - **Stretch (span)** — show all monitors, since the whole
+          composed map spans all of them.
+        """
+        if full_layout is None or not full_layout.monitors:
+            return full_layout
+        mode = self.settings.get("monitors_mode", "mirror")
+        from .monitors import MonitorLayout
+        if mode == "mirror":
+            # Prefer the primary; fall back to the first one.
+            primary = next((m for m in full_layout.monitors if m.is_primary),
+                           full_layout.monitors[0])
+            return MonitorLayout([primary], primary.x, primary.y,
+                                 primary.width, primary.height)
+        if mode == "independent":
+            idx = self._active_monitor_index()
+            selected = next((m for m in full_layout.monitors if m.index == idx),
+                            full_layout.monitors[0])
+            return MonitorLayout([selected], selected.x, selected.y,
+                                 selected.width, selected.height)
+        return full_layout  # stretch: everything as detected
 
     def _update_screen_area_preview(self) -> None:
         """Recompute the red-outlined map-area rect from current settings
@@ -954,8 +1005,23 @@ class MainWindow(QMainWindow):
                 cfg.get("center_lat", self.settings.get("center_lat", 0.0)),
             )
             self._refresh_void_fill_swatch()
+            # Also refresh the focal spinboxes and the Map & View tab's
+            # focal picker so they reflect this monitor's per-monitor
+            # centre.
+            if hasattr(self, "focal_lon_spin"):
+                self.focal_lon_spin.setValue(int(round(
+                    cfg.get("center_lon", self.settings.get("center_lon", 0.0)))))
+                self.focal_lat_spin.setValue(int(round(
+                    cfg.get("center_lat", self.settings.get("center_lat", 0.0)))))
         finally:
             self._initializing = False
+        # In custom mode, switching the edit target changes what the
+        # Screen Area preview shows (single monitor at a time).
+        if hasattr(self, "screen_area_preview"):
+            self.screen_area_preview.set_layout(
+                self._screen_area_layout(self._current_layout))
+            self._update_screen_area_preview()
+        self._refresh_focal_target_label()
 
     def _ensure_raw_map_thumb(self) -> None:
         """Lazily load a small thumbnail of the RAW active day map (plain
@@ -1069,6 +1135,28 @@ class MainWindow(QMainWindow):
                     self.hur_show_name_check, self.hur_show_track_check):
             wdt.blockSignals(False)
         self._refresh_hazard_swatches()
+
+    def _refresh_focal_target_label(self) -> None:
+        """Update the caption under the Map & View focal picker so it
+        always says whose centre the user is editing (global vs a
+        specific monitor in custom mode)."""
+        if not hasattr(self, "map_focal_target_label"):
+            return
+        mode = self.settings.get("monitors_mode", "mirror")
+        if mode == "independent":
+            idx = self._active_monitor_index()
+            layout = getattr(self, "_current_layout", None)
+            name = f"monitor {idx + 1}"
+            if layout is not None:
+                for m in layout.monitors:
+                    if m.index == idx:
+                        name = f"monitor {idx + 1} ({m.width}×{m.height})"
+                        break
+            self.map_focal_target_label.setText(
+                f"Editing centre for {name} — pick a different one on the Displays tab")
+        else:
+            self.map_focal_target_label.setText(
+                "Global map centre (mirror / stretch mode)")
 
     def _refresh_void_fill_swatch(self) -> None:
         from .monitors import monitor_config_for
@@ -1327,6 +1415,16 @@ class MainWindow(QMainWindow):
             # changes (only useful when each monitor can differ).
             if hasattr(self, "monitor_editor_row"):
                 self.monitor_editor_row.setVisible(new_mode == "independent")
+            # Switching modes re-filters what the Screen Area preview
+            # shows (mirror -> primary only, custom -> selected only,
+            # stretch -> everything). Push the current physical layout
+            # back through the filter.
+            if hasattr(self, "screen_area_preview") and mode_changed:
+                self.screen_area_preview.set_layout(
+                    self._screen_area_layout(self._current_layout))
+                self._update_screen_area_preview()
+            if mode_changed:
+                self._refresh_focal_target_label()
             # Switching INTO independent for the first time: reload the
             # UI controls from monitor 0's config so they reflect its
             # settings rather than whatever the last edit left.
@@ -1730,12 +1828,94 @@ class MainWindow(QMainWindow):
         if not getattr(self, "_monitors_detected_once", False):
             self._monitors_detected_once = True
             self._refresh_monitor_layout()
+            self._install_hotplug_watchers()
+
+    def _install_hotplug_watchers(self) -> None:
+        """Detect monitors being plugged in / unplugged after the app is
+        already running.
+
+        Two mechanisms, deliberately redundant because different window
+        managers wire these up differently:
+
+        1. Qt's QGuiApplication.screenAdded / screenRemoved / QScreen
+           geometry-changed signals - fires immediately on well-behaved
+           DEs (GNOME, KDE, most modern setups).
+        2. A slow polling timer (every 3s) that hashes the current
+           layout and re-detects if the hash changed - covers the case
+           where a WM doesn't emit the Qt signals reliably (some
+           tiling WMs, older X11 setups), so hot-plug still works
+           within a few seconds without any user action.
+        """
+        from PySide6.QtGui import QGuiApplication
+        from PySide6.QtCore import QTimer
+        try:
+            app = QGuiApplication.instance()
+            if app is not None:
+                app.screenAdded.connect(self._on_screens_changed)
+                app.screenRemoved.connect(self._on_screens_changed)
+                for scr in app.screens():
+                    scr.geometryChanged.connect(self._on_screens_changed)
+        except Exception:
+            pass  # Signals unavailable - the poll below still catches it.
+        self._layout_poll = QTimer(self)
+        self._layout_poll.setInterval(3000)
+        self._layout_poll.timeout.connect(self._poll_layout_change)
+        self._layout_poll.start()
+        self._last_layout_signature = self._layout_signature()
+
+    def _layout_signature(self) -> tuple:
+        """A cheap comparable fingerprint of the current display layout.
+        Any change here means we need to re-detect and refresh the UI."""
+        layout = getattr(self, "_current_layout", None)
+        if layout is None:
+            return ()
+        return tuple((m.index, m.x, m.y, m.width, m.height, m.is_primary)
+                     for m in layout.monitors)
+
+    def _poll_layout_change(self) -> None:
+        """Timer callback: re-detect if the layout fingerprint has
+        changed since the last poll. Cheap - detect_layout() itself is a
+        few QScreen reads, and the fingerprint compare is a tuple ==."""
+        from .monitors import detect_layout
+        try:
+            new_layout = detect_layout()
+        except Exception:
+            return
+        new_sig = tuple((m.index, m.x, m.y, m.width, m.height, m.is_primary)
+                        for m in new_layout.monitors)
+        if new_sig != self._last_layout_signature:
+            self._last_layout_signature = new_sig
+            self._refresh_monitor_layout()
+            # Also re-hook geometry-changed on any new QScreen objects.
+            from PySide6.QtGui import QGuiApplication
+            app = QGuiApplication.instance()
+            if app is not None:
+                for scr in app.screens():
+                    try:
+                        scr.geometryChanged.disconnect(self._on_screens_changed)
+                    except Exception:
+                        pass
+                    scr.geometryChanged.connect(self._on_screens_changed)
+
+    def _on_screens_changed(self, *_args) -> None:
+        """Qt signal handler - a screen was added, removed, or resized."""
+        self._refresh_monitor_layout()
+        self._last_layout_signature = self._layout_signature()
 
     def _on_render_done(self, output_path: str) -> None:
         from datetime import datetime
-        self._show_preview_pixmap(output_path)
         self.status_label.setText(
             f"Wallpaper updated {datetime.now().strftime('%H:%M:%S')}")
+        # Full render happens without the monitor overlay (it becomes the
+        # actual desktop wallpaper, and we don't want overlay lines baked
+        # into the wallpaper itself). But once the render is done, run a
+        # cheap preview render on top so the label KEEPS showing the
+        # helpful "which parts land on which screen" overlay. Otherwise
+        # hitting Update Now would visibly clobber the overlay - which
+        # was confusing when the wallpaper looked right but the preview
+        # suddenly changed to look wrong.
+        self._show_preview_pixmap(output_path)
+        self._schedule_preview_update()
 
     def _on_preview_render_done(self, output_path: str) -> None:
         self._show_preview_pixmap(output_path)
