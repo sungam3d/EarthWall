@@ -956,13 +956,17 @@ def _render_monitor_view(monitor, monitor_config: dict, global_center_lon: float
     return img
 
 
-def _apply_monitor_overlay(img: Image.Image, layout, out_w: int, out_h: int) -> Image.Image:
-    """Dim any part of `img` that doesn't overlap a physical monitor, and
-    outline each monitor with a subtle border. Used only for the in-app
-    preview so the user can see, in one glance, which parts of the map
-    will land on which screen - and where mismatched-monitor gaps leave
-    map content off-screen. Purely visual, never applied to the real
-    wallpaper output."""
+def _apply_monitor_overlay(img: Image.Image, layout, out_w: int, out_h: int,
+                            map_rect: tuple | None = None) -> Image.Image:
+    """Dim any part of `img` that doesn't overlap a physical monitor,
+    outline each monitor with a subtle border, and (if `map_rect` is
+    provided) draw a red outline around the map area itself. Used only
+    for the in-app preview so the user can see, in one glance, which
+    parts of the map will land on which screen - and where mismatched-
+    monitor gaps leave map content off-screen. The red map outline
+    matches the edit widget's red box visual language, so the two
+    previews look and read the same. Purely visual, never applied to
+    the real wallpaper output."""
     scale_x = out_w / max(1, layout.virtual_width)
     scale_y = out_h / max(1, layout.virtual_height)
 
@@ -991,6 +995,21 @@ def _apply_monitor_overlay(img: Image.Image, layout, out_w: int, out_h: int) -> 
     for lx, ly, rx, ry in rects:
         d.rectangle([lx, ly, rx - 1, ry - 1],
                     outline=(255, 255, 255), width=max(1, out_w // 900))
+
+    # 4. Red map-area outline (matches the Displays-tab edit widget). Any
+    #    subtle mismatch between where the map actually lands here vs.
+    #    where the edit widget predicts it becomes visible as two red
+    #    boxes that don't align.
+    if map_rect is not None:
+        mx, my, mw, mh = map_rect
+        # Clip so parts spilling off the canvas (zoom > 100%) don't error.
+        rx1 = max(0, mx)
+        ry1 = max(0, my)
+        rx2 = min(out_w - 1, mx + mw - 1)
+        ry2 = min(out_h - 1, my + mh - 1)
+        if rx2 > rx1 and ry2 > ry1:
+            d.rectangle([rx1, ry1, rx2, ry2],
+                        outline=(230, 50, 50), width=max(2, out_w // 700))
     return composited
 
 
@@ -1070,6 +1089,13 @@ def render(output_path: str | Path, width: int, height: int,
     is_span = (has_layout and not is_independent
                and monitors_mode in ("span", "mirror"))
 
+    # Map placement rect in output-canvas pixels (map_x, map_y, map_w,
+    # map_h). Populated by whichever branch runs and passed to the
+    # preview overlay so it can draw a red outline showing exactly where
+    # the map lands - matches the edit widget's red box visual language,
+    # so the two previews look and read the same.
+    map_rect_for_overlay: tuple[int, int, int, int] | None = None
+
     # ---- Independent mode: render each monitor separately ----
     if is_independent:
         # Scale monitor rects to fit the requested output size (usually
@@ -1137,6 +1163,7 @@ def render(output_path: str | Path, width: int, height: int,
             map_img, virtual_w, virtual_h, map_w, map_h, map_x, map_y,
             void_fill_color, void_fill_image,
         )
+        map_rect_for_overlay = (map_x, map_y, map_w, map_h)
 
     # ---- Mirror mode (default): classic single-image render ----
     else:
@@ -1153,7 +1180,8 @@ def render(output_path: str | Path, width: int, height: int,
     if preview_show_monitor_overlay and monitor_layout is not None \
             and (is_span or is_independent):
         composite = _apply_monitor_overlay(composite, monitor_layout,
-                                            width, height)
+                                            width, height,
+                                            map_rect_for_overlay)
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
