@@ -652,6 +652,17 @@ class MainWindow(QMainWindow):
         refresh_btn = QPushButton("Refresh")
         refresh_btn.clicked.connect(self._refresh_monitor_layout)
         det_row.addWidget(refresh_btn)
+        # A small "Copy" button that dumps the layout + current mode into
+        # the clipboard as plain text. Meant purely for support: if a
+        # user reports "the preview doesn't match my monitors", clicking
+        # this and pasting the result immediately reveals whether the
+        # app's view of the layout matches reality.
+        copy_btn = QPushButton("Copy info")
+        copy_btn.setToolTip(
+            "Copy the detected layout + current mode to the clipboard, "
+            "for sharing when the preview looks wrong.")
+        copy_btn.clicked.connect(self._copy_display_diagnostic)
+        det_row.addWidget(copy_btn)
         det_layout.addLayout(det_row)
         outer.addWidget(det_box)
 
@@ -793,6 +804,48 @@ class MainWindow(QMainWindow):
         self.screen_area_preview.set_layout(self._screen_area_layout(layout))
         self._update_screen_area_preview()
         self._rebuild_monitor_editor_combo()
+
+    def _copy_display_diagnostic(self) -> None:
+        """Dump the current display layout + settings state into the
+        clipboard as plain text. Purely a support aid - the goal is that
+        a user reporting 'the preview isn't matching my monitors' can
+        click one button and paste back exactly what the app thinks the
+        layout is, plus which mode / zoom / offsets are in play, without
+        having to type it out or take a screenshot."""
+        layout = getattr(self, "_current_layout", None)
+        lines = ["=== EarthWall display diagnostic ==="]
+        try:
+            from . import __version__ as ver
+        except Exception:
+            ver = "?"
+        lines.append(f"Version: {ver}")
+        lines.append(f"Mode: {self.settings.get('monitors_mode', '?')}")
+        if layout is not None:
+            lines.append(
+                f"Virtual desktop: {layout.virtual_width}x{layout.virtual_height}"
+                f" at origin ({layout.virtual_x}, {layout.virtual_y})")
+            for m in layout.monitors:
+                tag = " (primary)" if m.is_primary else ""
+                lines.append(
+                    f"  Monitor #{m.index + 1}{tag}: {m.width}x{m.height}"
+                    f" at ({m.x}, {m.y}) - name '{m.name}'")
+        else:
+            lines.append("No layout detected!")
+        rw, rh = self._current_resolution()
+        lines.append(f"Current render resolution: {rw}x{rh}")
+        pw, ph = self._preview_render_size()
+        lines.append(f"Preview render size: {pw}x{ph}")
+        cfg = (self.settings.get("monitor_configs") or {}).get("0", {})
+        lines.append(
+            f"Monitor 0 config: zoom={cfg.get('zoom', 1.0)}"
+            f" pos=({cfg.get('map_pos_x', 0)}, {cfg.get('map_pos_y', 0)})"
+            f" void_fill='{cfg.get('void_fill_color', '?')}'")
+        text = "\n".join(lines)
+        from PySide6.QtWidgets import QApplication
+        cb = QApplication.clipboard()
+        if cb is not None:
+            cb.setText(text)
+        self.status_label.setText("Layout info copied to clipboard.")
 
     def _screen_area_layout(self, full_layout):
         """Return the layout the Screen Area preview should DISPLAY,

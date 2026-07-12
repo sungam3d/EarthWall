@@ -980,7 +980,7 @@ def _apply_monitor_overlay(img: Image.Image, layout, out_w: int, out_h: int,
         ly = int(round((m.y - layout.virtual_y) * scale_y))
         rw = max(1, int(round(m.width * scale_x)))
         rh = max(1, int(round(m.height * scale_y)))
-        rects.append((lx, ly, lx + rw, ly + rh))
+        rects.append((lx, ly, lx + rw, ly + rh, m))
         mdraw.rectangle([lx, ly, lx + rw - 1, ly + rh - 1], fill=255)
 
     # 2. Build a much dimmer copy of the image. Compose original + dim
@@ -989,12 +989,42 @@ def _apply_monitor_overlay(img: Image.Image, layout, out_w: int, out_h: int,
     darkened = Image.eval(img.convert("RGB"), lambda v: v // 6)
     composited = Image.composite(img.convert("RGB"), darkened, mask)
 
-    # 3. Draw a soft outline around every monitor so the user can see the
-    #    boundaries even where the underlying map is dark.
+    # 3. Draw a soft outline around every monitor + a numbered corner
+    #    badge that matches the badges the Displays-tab edit widget
+    #    draws in the same corner. Same numbers in the same positions
+    #    in both views means any mismatch between preview and edit
+    #    widget is immediately obvious ("monitor 2 is at the top-right
+    #    here but bottom-left over there" - now visible at a glance).
     d = ImageDraw.Draw(composited)
-    for lx, ly, rx, ry in rects:
+    line_w = max(1, out_w // 900)
+    badge_font = _load_font(max(11, out_w // 90))
+    for lx, ly, rx, ry, m in rects:
+        # Primary monitor gets a subtly warmer outline than secondaries -
+        # a small extra cue that also matches the edit widget's red vs
+        # grey "1" and "2" badge colours.
+        outline_color = ((255, 100, 100) if m.is_primary
+                         else (230, 230, 230))
         d.rectangle([lx, ly, rx - 1, ry - 1],
-                    outline=(255, 255, 255), width=max(1, out_w // 900))
+                    outline=outline_color, width=line_w)
+        # Badge: small filled rect in the top-left of the monitor with
+        # its 1-based index, so it lines up visually with the edit
+        # widget which does exactly the same thing.
+        badge_bg = ((200, 40, 40) if m.is_primary else (90, 90, 100))
+        bx = lx + 3
+        by = ly + 3
+        bw = max(14, out_w // 80)
+        bh = max(14, out_w // 80)
+        d.rectangle([bx, by, bx + bw, by + bh], fill=badge_bg)
+        # Center the number inside the badge.
+        num_text = str(m.index + 1)
+        try:
+            tb = d.textbbox((0, 0), num_text, font=badge_font)
+            tw = tb[2] - tb[0]
+            th = tb[3] - tb[1]
+        except Exception:
+            tw, th = 8, 12
+        d.text((bx + (bw - tw) / 2, by + (bh - th) / 2 - 1),
+               num_text, font=badge_font, fill=(255, 255, 255))
 
     # 4. Red map-area outline (matches the Displays-tab edit widget). Any
     #    subtle mismatch between where the map actually lands here vs.
