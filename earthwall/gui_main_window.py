@@ -796,6 +796,16 @@ class MainWindow(QMainWindow):
         return w
 
     def _refresh_monitor_layout(self) -> None:
+        # If the user is currently interacting with the mode combo (its
+        # popup is showing), defer - refreshing right now would rebuild
+        # the screen-area preview and monitor-editor combo underneath
+        # the click, which is what caused the "combo becomes unclickable
+        # after hot-plug" symptom. Retry after a beat.
+        if hasattr(self, "monitors_mode_combo"):
+            v = self.monitors_mode_combo.view()
+            if v is not None and v.isVisible():
+                QTimer.singleShot(200, self._refresh_monitor_layout)
+                return
         from .monitors import detect_layout, _fallback_layout
         try:
             layout = detect_layout()
@@ -1043,27 +1053,66 @@ class MainWindow(QMainWindow):
         """Which monitor's per-monitor config the Displays-tab controls
         are currently editing. Only meaningful in "independent" mode -
         elsewhere everything routes through monitor 0's config, which
-        acts as the "global" config for span mode too."""
+        acts as the "global" config for span mode too.
+
+        Bounds-safe against hot-unplug: if the combo still points at a
+        monitor that no longer exists (user unplugged it while custom
+        mode was active), fall back to whatever the layout has now,
+        preferring the primary. Without this guard, subsequent config
+        reads / writes would happily create dangling configs and reads
+        would show stale data."""
         mode = self.settings.get("monitors_mode", "mirror")
         if mode == "independent" and hasattr(self, "monitor_editor_combo"):
             idx = self.monitor_editor_combo.currentData()
             if idx is not None:
-                return int(idx)
+                idx = int(idx)
+                layout = getattr(self, "_current_layout", None)
+                if layout is not None:
+                    valid = {m.index for m in layout.monitors}
+                    if idx in valid:
+                        return idx
+                    # Combo is stale - pick the primary, else the first.
+                    for m in layout.monitors:
+                        if m.is_primary:
+                            return m.index
+                    if layout.monitors:
+                        return layout.monitors[0].index
+                return idx  # no layout yet - trust the combo
         return 0
 
     def _rebuild_monitor_editor_combo(self) -> None:
         """Populate the 'Editing monitor' dropdown from the detected
-        layout. Called after a Refresh or on first show."""
+        layout. Called after a Refresh, on first show, and whenever a
+        monitor is hot-plugged/unplugged.
+
+        Two safety measures for the hot-plug case: (1) if the dropdown
+        popup is currently open (user interacting with it), defer the
+        rebuild until it closes - clearing/refilling items under an open
+        popup is what caused the "combo freezes" issue after hot-plug.
+        (2) preserve the previous selection when possible so the user
+        doesn't get bounced back to monitor #1 just because they plugged
+        in a second screen."""
         layout = getattr(self, "_current_layout", None)
         if layout is None or not hasattr(self, "monitor_editor_combo"):
             return
-        self.monitor_editor_combo.blockSignals(True)
-        self.monitor_editor_combo.clear()
-        for m in layout.monitors:
+        combo = self.monitor_editor_combo
+        # If a popup is open, we can't rebuild without breaking whatever
+        # the user is clicking on. Retry once it's dismissed.
+        if combo.view() is not None and combo.view().isVisible():
+            QTimer.singleShot(200, self._rebuild_monitor_editor_combo)
+            return
+        prev_idx = combo.currentData()
+        combo.blockSignals(True)
+        combo.clear()
+        target_row = 0
+        for row, m in enumerate(layout.monitors):
             tag = " (primary)" if m.is_primary else ""
-            self.monitor_editor_combo.addItem(
+            combo.addItem(
                 f"Monitor #{m.index + 1}{tag} – {m.width}×{m.height}", m.index)
-        self.monitor_editor_combo.blockSignals(False)
+            if prev_idx is not None and int(prev_idx) == m.index:
+                target_row = row
+        combo.setCurrentIndex(target_row)
+        combo.blockSignals(False)
         mode = self.settings.get("monitors_mode", "mirror")
         self.monitor_editor_row.setVisible(mode == "independent")
 
@@ -2076,6 +2125,16 @@ class MainWindow(QMainWindow):
            where a WM doesn't emit the Qt signals reliably (some
            tiling WMs, older X11 setups), so hot-plug still works
            within a few seconds without any user action.
+
+        Both feed into a single DEBOUNCED refresh: a hot-plug typically
+        emits screenAdded + one or more geometryChanged in a burst, and
+        Qt's own screen-management is still settling for a fraction of a
+        second afterwards. Running _refresh_monitor_layout on every one
+        of those was what caused the "mode combo becomes unresponsive"
+        symptom - the combo was being rebuilt underneath the user's
+        click. Coalescing into one refresh after a 300ms quiet period
+        keeps the UI responsive AND gives Qt time to finish its own
+        internal updates before we re-read screen data.
         """
         from PySide6.QtGui import QGuiApplication
         from PySide6.QtCore import QTimer
@@ -2088,6 +2147,13 @@ class MainWindow(QMainWindow):
                     scr.geometryChanged.connect(self._on_screens_changed)
         except Exception:
             pass  # Signals unavailable - the poll below still catches it.
+        # Debounce timer: any hot-plug signal starts / restarts this.
+        # When it eventually fires, we do ONE refresh.
+        self._layout_refresh_timer = QTimer(self)
+        self._layout_refresh_timer.setSingleShot(True)
+        self._layout_refresh_timer.setInterval(300)
+        self._layout_refresh_timer.timeout.connect(self._refresh_monitor_layout)
+        # Slow poll for WMs where Qt signals don't fire.
         self._layout_poll = QTimer(self)
         self._layout_poll.setInterval(3000)
         self._layout_poll.timeout.connect(self._poll_layout_change)
@@ -2106,7 +2172,9 @@ class MainWindow(QMainWindow):
     def _poll_layout_change(self) -> None:
         """Timer callback: re-detect if the layout fingerprint has
         changed since the last poll. Cheap - detect_layout() itself is a
-        few QScreen reads, and the fingerprint compare is a tuple ==."""
+        few QScreen reads, and the fingerprint compare is a tuple ==.
+        Any change queues a debounced refresh rather than refreshing
+        immediately - see _install_hotplug_watchers for why."""
         from .monitors import detect_layout
         try:
             new_layout = detect_layout()
@@ -2116,7 +2184,7 @@ class MainWindow(QMainWindow):
                         for m in new_layout.monitors)
         if new_sig != self._last_layout_signature:
             self._last_layout_signature = new_sig
-            self._refresh_monitor_layout()
+            self._layout_refresh_timer.start()   # debounced refresh
             # Also re-hook geometry-changed on any new QScreen objects.
             from PySide6.QtGui import QGuiApplication
             app = QGuiApplication.instance()
@@ -2124,13 +2192,15 @@ class MainWindow(QMainWindow):
                 for scr in app.screens():
                     try:
                         scr.geometryChanged.disconnect(self._on_screens_changed)
-                    except Exception:
+                    except (TypeError, RuntimeError):
                         pass
                     scr.geometryChanged.connect(self._on_screens_changed)
 
     def _on_screens_changed(self, *_args) -> None:
-        """Qt signal handler - a screen was added, removed, or resized."""
-        self._refresh_monitor_layout()
+        """Qt signal handler - a screen was added, removed, or resized.
+        Just queues a debounced refresh; the real work runs 300ms after
+        the last signal in the burst. See _install_hotplug_watchers."""
+        self._layout_refresh_timer.start()   # start / restart the debounce
         self._last_layout_signature = self._layout_signature()
 
     def _on_render_done(self, output_path: str) -> None:
