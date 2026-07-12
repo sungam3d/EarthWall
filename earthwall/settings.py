@@ -26,6 +26,10 @@ DEFAULTS = {
     "cloud_density": 1.0,   # 1.0 = raw satellite coverage; lower thins the field
     "night_view": True,     # False = full daylight map, no terminator/night side
     "start_in_tray": False, # True = launch hidden in the system tray
+    # Which profile (a named snapshot under profiles/) is currently
+    # loaded. Empty string = no profile loaded, settings.json is being
+    # used as an unnamed working draft.
+    "active_profile": "",
     # --- Performance / power ---
     # Low usage mode: cap the render resolution and use cheaper resampling
     # so an update takes noticeably less CPU. Useful on laptops on battery

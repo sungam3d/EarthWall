@@ -202,6 +202,45 @@ class MainWindow(QMainWindow):
         w = QWidget()
         layout = QVBoxLayout(w)
 
+        # ---- Profiles --------------------------------------------------
+        # Named snapshots of the whole config so users can maintain
+        # different setups (e.g. "Home 4K + hazards", "Travel laptop
+        # low-power", "Presentation clean") and swap between them with a
+        # dropdown. Sits at the top of the tab because it applies to
+        # everything below.
+        profiles_box = QGroupBox("Profile")
+        profiles_layout = QVBoxLayout(profiles_box)
+        profiles_layout.addWidget(QLabel(
+            "Save your current setup as a named profile you can switch "
+            "back to later. Selecting a profile loads its settings and "
+            "cities; hitting Save writes your current state to it."))
+        prof_row = QHBoxLayout()
+        prof_row.addWidget(QLabel("Active profile:"))
+        self.profile_combo = QComboBox()
+        self.profile_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.profile_combo.currentIndexChanged.connect(self._on_profile_selected)
+        prof_row.addWidget(self.profile_combo, stretch=1)
+        self.profile_save_btn = QPushButton("Save")
+        self.profile_save_btn.setToolTip(
+            "Overwrite the currently-selected profile with your current "
+            "settings + cities.")
+        self.profile_save_btn.clicked.connect(self._save_active_profile)
+        prof_row.addWidget(self.profile_save_btn)
+        self.profile_new_btn = QPushButton("New…")
+        self.profile_new_btn.setToolTip(
+            "Save the current settings + cities as a new named profile.")
+        self.profile_new_btn.clicked.connect(self._create_new_profile)
+        prof_row.addWidget(self.profile_new_btn)
+        self.profile_rename_btn = QPushButton("Rename…")
+        self.profile_rename_btn.clicked.connect(self._rename_active_profile)
+        prof_row.addWidget(self.profile_rename_btn)
+        self.profile_delete_btn = QPushButton("Delete")
+        self.profile_delete_btn.clicked.connect(self._delete_active_profile)
+        prof_row.addWidget(self.profile_delete_btn)
+        profiles_layout.addLayout(prof_row)
+        layout.addWidget(profiles_box)
+
         form = QFormLayout()
         self.interval_spin = QSpinBox()
         self.interval_spin.setRange(1, 180)
@@ -1394,6 +1433,9 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------ settings <-> UI
     def _load_settings_into_ui(self) -> None:
         s = self.settings
+        # Populate the profile dropdown from disk and select the
+        # currently-active one, if any.
+        self._refresh_profile_combo()
         self.interval_spin.blockSignals(True)
         self.interval_spin.setValue(max(1, s["interval_seconds"] // 60))
         self.interval_spin.blockSignals(False)
@@ -1820,6 +1862,220 @@ class MainWindow(QMainWindow):
             self.progress.show()
         else:
             self.progress.hide()
+
+    # ---- Profiles -----------------------------------------------------
+
+    def _refresh_profile_combo(self) -> None:
+        """Rebuild the profile dropdown from disk. Adds a synthetic
+        "(unsaved)" entry at the top for the state where the user hasn't
+        loaded a named profile - that's the default working config in
+        settings.json. Preserves the active profile if it still exists."""
+        from . import profiles as profiles_module
+        if not hasattr(self, "profile_combo"):
+            return
+        combo = self.profile_combo
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("(unsaved working config)", "")
+        for name in profiles_module.list_profiles():
+            combo.addItem(name, name)
+        active = self.settings.get("active_profile") or ""
+        for i in range(combo.count()):
+            if combo.itemData(i) == active:
+                combo.setCurrentIndex(i)
+                break
+        combo.blockSignals(False)
+        # Rename / Delete only make sense when a real profile is selected,
+        # not when the user is on the synthetic "(unsaved)" entry.
+        has_profile = bool(active)
+        self.profile_rename_btn.setEnabled(has_profile)
+        self.profile_delete_btn.setEnabled(has_profile)
+        self.profile_save_btn.setEnabled(has_profile)
+
+    def _on_profile_selected(self, _idx: int) -> None:
+        """User picked a profile from the dropdown. Loading a profile
+        wipes the current in-memory settings and cities and replaces
+        them with what's in the profile file - we ask for confirmation
+        first, and auto-backup the current state before replacing, in
+        case the switch turns out wrong."""
+        if getattr(self, "_initializing", False):
+            return
+        from PySide6.QtWidgets import QMessageBox
+        from . import profiles as profiles_module
+        name = self.profile_combo.currentData() or ""
+        current_active = self.settings.get("active_profile") or ""
+        if name == current_active:
+            return   # picked the same one - nothing to do
+        # The "(unsaved)" entry just clears active_profile; no bundle load.
+        if not name:
+            self.settings["active_profile"] = ""
+            settings_module.save_settings(self.settings)
+            self._refresh_profile_combo()
+            return
+        try:
+            new_settings, new_cities = profiles_module.load_profile(name)
+        except (FileNotFoundError, ValueError, OSError) as e:
+            QMessageBox.critical(
+                self, "Profile load failed",
+                f"Couldn't load profile {name!r}:\n{e}")
+            self._refresh_profile_combo()   # snap combo back to whatever's active
+            return
+        reply = QMessageBox.question(
+            self, "Switch profile?",
+            f"Replace your current settings and {len(self.cities)} cities with "
+            f"the {len(new_cities)} cities and settings from profile {name!r}?\n\n"
+            "Your existing configuration will be backed up automatically.",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            self._refresh_profile_combo()
+            return
+        # Backup current state before replacing (same as Import does).
+        try:
+            backup = settings_module.export_bundle(self.settings, self.cities)
+            backup_path = (settings_module.CONFIG_DIR
+                           / f"settings-backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json")
+            settings_module.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            with open(backup_path, "w") as f:
+                json.dump(backup, f, indent=2)
+        except OSError:
+            backup_path = None
+        # Apply.
+        self.settings = new_settings
+        self.cities = new_cities
+        self.settings["active_profile"] = name
+        settings_module.save_settings(self.settings)
+        settings_module.save_cities(self.cities)
+        self._load_settings_into_ui()
+        self._refresh_city_table()
+        self._refresh_profile_combo()
+        self._schedule_preview_update()
+        msg = f"Loaded profile {name!r}."
+        if backup_path is not None:
+            msg += f" Previous config backed up to {backup_path.name}."
+        self.status_label.setText(msg)
+
+    def _save_active_profile(self) -> None:
+        """Write the current in-memory settings + cities back to the
+        active profile file, overwriting whatever was there. No-op if
+        no profile is active - the button is disabled in that case
+        anyway, but belt-and-braces."""
+        from PySide6.QtWidgets import QMessageBox
+        from . import profiles as profiles_module
+        name = self.settings.get("active_profile") or ""
+        if not name:
+            return
+        try:
+            profiles_module.save_profile(name, self.settings, self.cities)
+            self.status_label.setText(
+                f"Profile {name!r} updated with current settings.")
+        except (OSError, ValueError) as e:
+            QMessageBox.critical(
+                self, "Save failed",
+                f"Couldn't save profile {name!r}:\n{e}")
+
+    def _create_new_profile(self) -> None:
+        """Prompt the user for a name and save the current state as a
+        new profile under that name. Sets the new profile as active."""
+        from PySide6.QtWidgets import QInputDialog, QMessageBox
+        from . import profiles as profiles_module
+        name, ok = QInputDialog.getText(
+            self, "New profile",
+            "Name for the new profile:",
+            text="")
+        if not ok:
+            return
+        name = name.strip()
+        if not profiles_module.is_valid_name(name):
+            QMessageBox.warning(
+                self, "Invalid name",
+                "Profile names must be 1-64 characters and can contain "
+                "letters, numbers, spaces, dots, dashes, and underscores.")
+            return
+        if name in profiles_module.list_profiles():
+            reply = QMessageBox.question(
+                self, "Overwrite profile?",
+                f"A profile named {name!r} already exists. Overwrite it?",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+        try:
+            profiles_module.save_profile(name, self.settings, self.cities)
+        except (OSError, ValueError) as e:
+            QMessageBox.critical(
+                self, "Save failed",
+                f"Couldn't create profile {name!r}:\n{e}")
+            return
+        self.settings["active_profile"] = name
+        settings_module.save_settings(self.settings)
+        self._refresh_profile_combo()
+        self.status_label.setText(f"Created profile {name!r}.")
+
+    def _rename_active_profile(self) -> None:
+        """Prompt the user for a new name for the currently-selected
+        profile and rename its file to match."""
+        from PySide6.QtWidgets import QInputDialog, QMessageBox
+        from . import profiles as profiles_module
+        old = self.settings.get("active_profile") or ""
+        if not old:
+            return
+        new, ok = QInputDialog.getText(
+            self, "Rename profile",
+            f"New name for profile {old!r}:",
+            text=old)
+        if not ok:
+            return
+        new = new.strip()
+        if new == old:
+            return
+        if not profiles_module.is_valid_name(new):
+            QMessageBox.warning(
+                self, "Invalid name",
+                "Profile names must be 1-64 characters and can contain "
+                "letters, numbers, spaces, dots, dashes, and underscores.")
+            return
+        try:
+            profiles_module.rename_profile(old, new)
+        except (FileNotFoundError, FileExistsError, ValueError, OSError) as e:
+            QMessageBox.critical(
+                self, "Rename failed",
+                f"Couldn't rename {old!r} to {new!r}:\n{e}")
+            return
+        self.settings["active_profile"] = new
+        settings_module.save_settings(self.settings)
+        self._refresh_profile_combo()
+        self.status_label.setText(f"Renamed profile {old!r} to {new!r}.")
+
+    def _delete_active_profile(self) -> None:
+        """Remove the currently-selected profile file after confirmation.
+        The in-memory settings + cities stay as they are - deleting the
+        profile just removes the saved snapshot, it doesn't wipe the
+        state you're currently editing."""
+        from PySide6.QtWidgets import QMessageBox
+        from . import profiles as profiles_module
+        name = self.settings.get("active_profile") or ""
+        if not name:
+            return
+        reply = QMessageBox.question(
+            self, "Delete profile?",
+            f"Delete profile {name!r}? Your current settings won't be "
+            "changed - only the saved snapshot goes away.",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        try:
+            profiles_module.delete_profile(name)
+        except (OSError, ValueError) as e:
+            QMessageBox.critical(
+                self, "Delete failed",
+                f"Couldn't delete profile {name!r}:\n{e}")
+            return
+        self.settings["active_profile"] = ""
+        settings_module.save_settings(self.settings)
+        self._refresh_profile_combo()
+        self.status_label.setText(f"Deleted profile {name!r}.")
 
     def _export_settings(self) -> None:
         """Save all current settings + cities to a JSON file the user
