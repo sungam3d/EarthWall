@@ -63,11 +63,34 @@ class ScreenAreaPreview(QWidget):
         # look like on your desktop" impression.
         self._map_thumb: QPixmap | None = None
         self.setMinimumHeight(180)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        # heightForWidth: the widget takes a height that matches the
+        # virtual-desktop's aspect ratio. That way the layout fills the
+        # widget completely without margins, and monitor rectangles land
+        # at the same proportional positions the main preview overlay
+        # renders them at - so overlaying one view on the other lines up
+        # exactly, which is how users compare them.
+        sp = QSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        sp.setHeightForWidth(True)
+        self.setSizePolicy(sp)
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        if self._layout is None or self._layout.virtual_width <= 0 \
+                or self._layout.virtual_height <= 0:
+            # Sensible default before layout is known (2:1 map aspect).
+            return max(180, width // 2)
+        h = int(round(width * self._layout.virtual_height
+                      / self._layout.virtual_width))
+        return max(180, h)
 
     # ----- public API --------------------------------------------------
     def set_layout(self, layout: MonitorLayout) -> None:
         self._layout = layout
+        # Aspect changed → have Qt re-run our heightForWidth so the
+        # widget resizes to the new layout's shape.
+        self.updateGeometry()
         self.update()
 
     def set_map_area(self, area: tuple[int, int, int, int] | None) -> None:
@@ -90,14 +113,22 @@ class ScreenAreaPreview(QWidget):
         map rectangle is then drawn relative to that same transform and
         simply clipped to the widget if it spills outside (zoom > 100%),
         so the desktop appears to sit *behind* the map exactly as it
-        does on the real screen. Reserves a generous margin so a zoomed-
-        out map (which sits inside the monitor) still has room, and a
-        zoomed-in map's overflow has somewhere to bleed to."""
-        margin = 24
-        avail_w = max(1, self.width() - margin * 2)
-        avail_h = max(1, self.height() - margin * 2)
+        does on the real screen.
+
+        No margin. The virtual desktop fills the widget the same way it
+        fills the wallpaper preview above - so a user comparing monitor
+        positions between the two views sees them in the same widget-
+        space proportions. (Earlier a 24px margin was reserved to give
+        the zoom > 100% red map outline somewhere to bleed to, but that
+        margin is exactly what made monitor rectangles land at different
+        widget-pixel positions between here and the main preview. The
+        red outline is now simply clipped to the widget edge, which
+        matches how the preview handles the same overflow.)
+        """
         if self._layout is None or self._layout.virtual_width <= 0:
-            return 1.0, margin, margin
+            return 1.0, 0.0, 0.0
+        avail_w = max(1, self.width())
+        avail_h = max(1, self.height())
         sx = avail_w / self._layout.virtual_width
         sy = avail_h / self._layout.virtual_height
         s = min(sx, sy)
