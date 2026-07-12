@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import subprocess
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
@@ -125,9 +127,17 @@ class MainWindow(QMainWindow):
 
         self.preview_label = QLabel(self.preview_container)
         self.preview_label.setAlignment(Qt.AlignCenter)
-        self.preview_label.setStyleSheet(
+        # Two style states: text mode (dark background + padding for the
+        # first-load spinner and error messages) and pixmap mode (fully
+        # transparent so the rendered image sits flush without a dark
+        # border framing it). We swap them explicitly whenever setPixmap
+        # / setText is called via the tiny helper below.
+        self._preview_text_style = (
             "background:#111; color:#bbb; border-radius:6px;"
             " font-size: 13px; padding: 24px;")
+        self._preview_pixmap_style = (
+            "background: transparent; padding: 0;")
+        self.preview_label.setStyleSheet(self._preview_text_style)
         self.preview_label.setWordWrap(True)
         self.preview_label.setScaledContents(False)
         self.preview_label.setMinimumSize(1, 1)  # allow shrinking; parent controls actual size
@@ -166,7 +176,7 @@ class MainWindow(QMainWindow):
         self.next_label = QLabel("")
         self.next_label.setStyleSheet("color:#666;")
         refresh_btn = QPushButton("Update Now")
-        refresh_btn.clicked.connect(self.trigger_update)
+        refresh_btn.clicked.connect(self._trigger_manual_update)
         self.pause_btn = QPushButton("Pause Auto-Update")
         self.pause_btn.setCheckable(True)
         self.pause_btn.toggled.connect(self._on_pause_toggled)
@@ -236,6 +246,50 @@ class MainWindow(QMainWindow):
         self.start_in_tray_check.setStyleSheet("margin-left: 20px;")
         self.start_in_tray_check.toggled.connect(self._on_settings_changed)
         layout.addWidget(self.start_in_tray_check)
+
+        # ---- Performance -----------------------------------------------
+        # Two toggles for people running EarthWall alongside heavy other
+        # work: cap render cost, and stand aside when a game / video is
+        # fullscreen. Both are OFF by default so nothing changes for
+        # users who don't need them.
+        perf_box = QGroupBox("Performance")
+        perf_layout = QVBoxLayout(perf_box)
+        self.low_usage_check = QCheckBox(
+            "Low usage mode (softer render, ~30-50% less CPU per update)")
+        self.low_usage_check.setToolTip(
+            "Caps render resolution at 1920x1080, uses bilinear resampling, "
+            "and skips the sharpening pass. Best on laptops on battery or "
+            "when EarthWall is running alongside heavy other work.")
+        self.low_usage_check.toggled.connect(self._on_settings_changed)
+        perf_layout.addWidget(self.low_usage_check)
+
+        self.pause_on_fullscreen_check = QCheckBox(
+            "Pause auto-updates when a fullscreen app is active (games, videos)")
+        self.pause_on_fullscreen_check.setToolTip(
+            "Uses the standard X11 _NET_WM_STATE_FULLSCREEN hint. Skipped "
+            "updates resume automatically once you exit fullscreen. "
+            "Manual 'Update Now' still runs regardless.")
+        self.pause_on_fullscreen_check.toggled.connect(self._on_settings_changed)
+        perf_layout.addWidget(self.pause_on_fullscreen_check)
+        layout.addWidget(perf_box)
+
+        # ---- Import / Export -------------------------------------------
+        # Save/load ALL settings + cities as a single JSON bundle. Handy
+        # for moving a hand-tuned setup between machines or backing up
+        # before experimenting.
+        io_box = QGroupBox("Settings backup")
+        io_layout = QHBoxLayout(io_box)
+        io_layout.addWidget(QLabel(
+            "Save or load your complete configuration (settings + cities)"
+            " as a single JSON file:"))
+        io_layout.addStretch()
+        self.export_btn = QPushButton("Export…")
+        self.export_btn.clicked.connect(self._export_settings)
+        io_layout.addWidget(self.export_btn)
+        self.import_btn = QPushButton("Import…")
+        self.import_btn.clicked.connect(self._import_settings)
+        io_layout.addWidget(self.import_btn)
+        layout.addWidget(io_box)
 
         layout.addStretch()
         return w
@@ -1330,6 +1384,13 @@ class MainWindow(QMainWindow):
         if hasattr(self, "start_in_tray_check"):
             self.start_in_tray_check.blockSignals(True)
             self.start_in_tray_check.setChecked(bool(s.get("start_in_tray", False)))
+        if hasattr(self, "low_usage_check"):
+            self.low_usage_check.blockSignals(True)
+            self.low_usage_check.setChecked(bool(s.get("low_usage_mode", False)))
+            self.low_usage_check.blockSignals(False)
+            self.pause_on_fullscreen_check.blockSignals(True)
+            self.pause_on_fullscreen_check.setChecked(bool(s.get("pause_on_fullscreen", False)))
+            self.pause_on_fullscreen_check.blockSignals(False)
             self.start_in_tray_check.blockSignals(False)
 
         self.clouds_check.blockSignals(True)
@@ -1483,6 +1544,9 @@ class MainWindow(QMainWindow):
             self.settings["hazard_scan_minutes"] = int(self.hazard_scan_spin.value())
         if hasattr(self, "start_in_tray_check"):
             self.settings["start_in_tray"] = self.start_in_tray_check.isChecked()
+        if hasattr(self, "low_usage_check"):
+            self.settings["low_usage_mode"] = self.low_usage_check.isChecked()
+            self.settings["pause_on_fullscreen"] = self.pause_on_fullscreen_check.isChecked()
         # --- Multi-monitor / Displays tab ---
         if hasattr(self, "monitors_mode_combo"):
             new_mode = self.monitors_mode_combo.currentData() or "mirror"
@@ -1728,6 +1792,97 @@ class MainWindow(QMainWindow):
         else:
             self.progress.hide()
 
+    def _export_settings(self) -> None:
+        """Save all current settings + cities to a JSON file the user
+        picks. Handy for backing up before experimenting, or for moving a
+        finished setup between machines."""
+        from PySide6.QtWidgets import QFileDialog
+        default_name = f"earthwall-settings-{datetime.now().strftime('%Y%m%d')}.json"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export EarthWall settings",
+            str(Path.home() / default_name),
+            "JSON files (*.json);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            bundle = settings_module.export_bundle(self.settings, self.cities)
+            with open(path, "w") as f:
+                json.dump(bundle, f, indent=2)
+            self.status_label.setText(f"Settings exported to {Path(path).name}")
+        except OSError as e:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.critical(
+                self, "Export failed",
+                f"Could not write {path}:\n{e}")
+
+    def _import_settings(self) -> None:
+        """Replace current settings + cities with those from a JSON file
+        the user picks. Asks for confirmation first - this discards their
+        current setup - and offers to back up the existing config to
+        <path>.bak before overwriting, in case the import turns out
+        wrong."""
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import EarthWall settings",
+            str(Path.home()),
+            "JSON files (*.json);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            with open(path) as f:
+                bundle = json.load(f)
+            new_settings, new_cities = settings_module.import_bundle(bundle)
+        except (OSError, json.JSONDecodeError, ValueError) as e:
+            QMessageBox.critical(
+                self, "Import failed",
+                f"Couldn't read that file as an EarthWall bundle:\n{e}")
+            return
+        # Confirmation - imports are destructive.
+        n_cities = len(new_cities)
+        reply = QMessageBox.question(
+            self, "Import settings?",
+            f"Replace your current settings and {len(self.cities)} cities with "
+            f"the {n_cities} cities and settings from this file?\n\n"
+            "Your existing configuration will be backed up automatically.",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        # Backup current config before overwriting.
+        try:
+            backup = settings_module.export_bundle(self.settings, self.cities)
+            backup_path = (settings_module.CONFIG_DIR
+                           / f"settings-backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json")
+            settings_module.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            with open(backup_path, "w") as f:
+                json.dump(backup, f, indent=2)
+        except OSError:
+            backup_path = None  # non-fatal
+        # Apply.
+        self.settings = new_settings
+        self.cities = new_cities
+        settings_module.save_settings(self.settings)
+        settings_module.save_cities(self.cities)
+        self._load_settings_into_ui()
+        self._refresh_city_table()
+        self._schedule_preview_update()
+        msg = f"Imported {n_cities} cities and updated settings."
+        if backup_path is not None:
+            msg += f" Previous config backed up to {backup_path.name}."
+        self.status_label.setText(msg)
+
+    def _trigger_manual_update(self, *_qt_args) -> None:
+        """Wrap trigger_update with a "user hit the button" flag so the
+        fullscreen check is bypassed - manual clicks should always run,
+        even if a game is on screen (the user is asking for it)."""
+        self._manual_update = True
+        try:
+            self.trigger_update()
+        finally:
+            self._manual_update = False
+
     def trigger_update(self, *_qt_args) -> None:
         """Full-resolution render + apply as the desktop wallpaper. Used by
         the auto-update timer, the 'Update Now' button, and the tray.
@@ -1739,6 +1894,20 @@ class MainWindow(QMainWindow):
         tray action was used - the timer worked, the button didn't."""
         if self._worker is not None and self._worker.isRunning():
             return  # a render is already in flight, skip this tick
+        # "Pause on fullscreen": skip the render if a game / video-in-
+        # fullscreen is currently focused. Only checked on auto-tick paths;
+        # the user clicking Update Now (a manual action) should always
+        # honour that intent and render immediately regardless.
+        if self.settings.get("pause_on_fullscreen") \
+                and not getattr(self, "_manual_update", False):
+            try:
+                from .fullscreen import is_fullscreen_window_active
+                if is_fullscreen_window_active():
+                    self.status_label.setText(
+                        "Update skipped - fullscreen app is active")
+                    return
+            except Exception:
+                pass  # detection failure = fall through to normal render
         width, height = self._current_resolution()
         output_path = pick_next_wallpaper_path(WALLPAPER_BASE)
         self.status_label.setText("Rendering…")
@@ -1827,7 +1996,18 @@ class MainWindow(QMainWindow):
         max_h = max(180, min(360, self.height() // 3))
         rw, rh = self._current_resolution()
         aspect = rh / max(1, rw)  # follow the real wallpaper's shape
-        target_h = min(max_h, int(available_w * aspect))
+        target_h = int(available_w * aspect)
+        # When the natural height exceeds max_h (very wide multi-monitor
+        # layouts), don't just cap the height - also cap the WIDTH so the
+        # container keeps the same aspect as the wallpaper. Otherwise the
+        # pixmap gets letterboxed inside a too-wide container and users
+        # see a dark border on the sides.
+        if target_h > max_h:
+            target_h = max_h
+            target_w = max(320, min(available_w, int(target_h / max(0.001, aspect))))
+            self.preview_container.setMaximumWidth(target_w)
+        else:
+            self.preview_container.setMaximumWidth(16777215)  # QWIDGETSIZE_MAX (uncapped)
         self.preview_container.setFixedHeight(max(120, target_h))
 
     def _tick_spinner(self) -> None:
@@ -1836,6 +2016,9 @@ class MainWindow(QMainWindow):
         on the initial slow render."""
         self._spinner_dots = (self._spinner_dots + 1) % 4
         dots = "." * self._spinner_dots + " " * (3 - self._spinner_dots)
+        # Text mode: dark background + padding, so the info reads clearly
+        # against the surrounding UI while we wait for the first render.
+        self.preview_label.setStyleSheet(self._preview_text_style)
         self.preview_label.setText(
             f"Preparing your first Earth view {dots}\n\n"
             "The first render is the slow one:\n"
@@ -1866,9 +2049,12 @@ class MainWindow(QMainWindow):
         if self._last_preview_pixmap is None or self._last_preview_pixmap.isNull():
             return
         # Scale to the container's CURRENT geometry, not the label's - the
-        # label's size trails the container by one layout pass, and using
-        # a stale label size makes the pixmap smaller than the container
-        # and the container's dark background bleeds through around it.
+        # label's size trails the container by one layout pass. Also swap
+        # the label into "pixmap mode" (transparent, no padding) so the
+        # rendered image sits flush inside the container instead of being
+        # framed by the label's dark text-mode background - that's the
+        # black border users saw around the preview.
+        self.preview_label.setStyleSheet(self._preview_pixmap_style)
         w = max(320, self.preview_container.width())
         h = max(180, self.preview_container.height())
         scaled = self._last_preview_pixmap.scaled(

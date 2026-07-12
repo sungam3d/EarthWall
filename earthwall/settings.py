@@ -26,6 +26,16 @@ DEFAULTS = {
     "cloud_density": 1.0,   # 1.0 = raw satellite coverage; lower thins the field
     "night_view": True,     # False = full daylight map, no terminator/night side
     "start_in_tray": False, # True = launch hidden in the system tray
+    # --- Performance / power ---
+    # Low usage mode: cap the render resolution and use cheaper resampling
+    # so an update takes noticeably less CPU. Useful on laptops on battery
+    # or on machines where a background app running a full-res LANCZOS
+    # every N minutes is noticeable.
+    "low_usage_mode": False,
+    # Pause auto-updates while a fullscreen window (typically a game or a
+    # video player) is active on any output. Detects fullscreen via the
+    # standard X11 _NET_WM_STATE property.
+    "pause_on_fullscreen": False,
     # --- Hazard overlays ---
     "show_earthquakes": False,
     "earthquake_min_mag": 4.5,     # only show quakes at/above this magnitude
@@ -100,3 +110,52 @@ def save_cities(cities: list[dict]) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with open(CITIES_PATH, "w") as f:
         json.dump(cities, f, indent=2)
+
+
+# ---------- import / export bundles ---------------------------------------
+
+# The bundle format is a plain JSON object with two top-level keys plus a
+# small header. Keeping it human-readable and stable across versions is
+# deliberate: users may hand-edit these or share them between machines,
+# and a rigid schema would just create upgrade pain later on.
+EXPORT_SCHEMA_VERSION = 1
+
+
+def export_bundle(settings: dict, cities: list[dict]) -> dict:
+    """Build a JSON-serialisable dict containing everything that makes a
+    user's EarthWall setup unique - settings AND cities plus any per-
+    city notes / weather flags / label styling. Written to disk via
+    ``json.dump`` in the GUI's export handler."""
+    return {
+        "kind": "earthwall-settings-bundle",
+        "schema": EXPORT_SCHEMA_VERSION,
+        "settings": dict(settings),
+        "cities": list(cities),
+    }
+
+
+def import_bundle(bundle: dict) -> tuple[dict, list[dict]]:
+    """Parse a bundle dict (typically loaded from a user's JSON file)
+    into the (settings, cities) pair the app uses at runtime.
+
+    We're liberal about what we accept: missing fields fall back to
+    defaults, unexpected fields are ignored, and if the top-level shape
+    is completely wrong (e.g. the file isn't ours at all) we raise a
+    ValueError so the caller can show a friendly message rather than
+    silently trashing the user's config with a half-loaded bundle."""
+    if not isinstance(bundle, dict):
+        raise ValueError("Not an EarthWall settings bundle (expected a JSON object).")
+    if bundle.get("kind") != "earthwall-settings-bundle":
+        raise ValueError(
+            "Not an EarthWall settings bundle - the file doesn't have the "
+            "expected 'kind' marker. Are you sure it was exported from EarthWall?"
+        )
+    settings_in = bundle.get("settings") or {}
+    cities_in = bundle.get("cities") or []
+    if not isinstance(settings_in, dict) or not isinstance(cities_in, list):
+        raise ValueError("Bundle is malformed (settings must be an object, cities a list).")
+    # Merge on top of DEFAULTS so any new keys the current version
+    # expects are populated even if the bundle is from an older release.
+    merged = dict(DEFAULTS)
+    merged.update(settings_in)
+    return merged, cities_in

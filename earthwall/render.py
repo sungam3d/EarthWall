@@ -835,18 +835,26 @@ def _render_map_image(width: int, height: int, cities: list[dict],
                        weather_by_city: dict | None,
                        earthquakes: list | None = None,
                        hurricanes: list | None = None,
-                       hazard_style: dict | None = None) -> Image.Image:
+                       hazard_style: dict | None = None,
+                       low_usage: bool = False) -> Image.Image:
     """Produce a single (width x height) map image with day/night,
     clouds, hazard overlays, and city markers all applied. Extracted from
     render() so the independent multi-monitor branch can call it once per
-    monitor with per-monitor parameters."""
+    monitor with per-monitor parameters.
+
+    `low_usage`: when True, use cheaper resampling (BILINEAR instead of
+    LANCZOS) and skip the unsharp-mask sharpening pass. Combined trims
+    ~30-50% off the CPU cost of a render at the cost of a slightly
+    softer-looking map. Suitable for laptops on battery or background
+    updates on a busy machine."""
     day_img, night_img = _load_maps(map_id)
+    resample = Image.BILINEAR if low_usage else Image.LANCZOS
     # Downsample to target size BEFORE the per-pixel day/night blend -
     # blend and unsharp then scale with the requested output size rather
     # than the ~5400x2700 source resolution.
     if day_img.size != (width, height):
-        day_img = day_img.resize((width, height), Image.LANCZOS)
-        night_img = night_img.resize((width, height), Image.LANCZOS)
+        day_img = day_img.resize((width, height), resample)
+        night_img = night_img.resize((width, height), resample)
 
     if night_view:
         composite = _composite_day_night(day_img, night_img, sub_lat, sub_lon,
@@ -854,7 +862,8 @@ def _render_map_image(width: int, height: int, cities: list[dict],
     else:
         composite = day_img.convert("RGB")
     composite = _roll_longitude(composite, center_lon)
-    composite = composite.filter(ImageFilter.UnsharpMask(radius=1.5, percent=60, threshold=2))
+    if not low_usage:
+        composite = composite.filter(ImageFilter.UnsharpMask(radius=1.5, percent=60, threshold=2))
 
     if cloud_layer is not None:
         composite = _apply_clouds(composite, cloud_layer, center_lon,
@@ -882,7 +891,8 @@ def _render_monitor_view(monitor, monitor_config: dict, global_center_lon: float
                           weather_by_city: dict | None,
                           earthquakes: list | None = None,
                           hurricanes: list | None = None,
-                          hazard_style: dict | None = None) -> Image.Image:
+                          hazard_style: dict | None = None,
+                          low_usage: bool = False) -> Image.Image:
     """Render a single monitor's view in "independent" mode, sized to
     that monitor's exact pixel dimensions.
 
@@ -920,7 +930,8 @@ def _render_monitor_view(monitor, monitor_config: dict, global_center_lon: float
                              map_id, m_lon, twilight_width_deg, night_darkness,
                              cloud_layer, cloud_opacity, cloud_density,
                              night_view, temp_units, weather_by_city,
-                             earthquakes, hurricanes, hazard_style)
+                             earthquakes, hurricanes, hazard_style,
+                             low_usage=low_usage)
 
     # Offset in pixels for this render's canvas.
     off_x = int(round(pos_x_frac * mw))
@@ -1095,7 +1106,10 @@ def render(output_path: str | Path, width: int, height: int,
            # of showing the full compose canvas as if it were one flat
            # display. Only meaningful in span/independent mode with a
            # layout.
-           preview_show_monitor_overlay: bool = False) -> None:
+           preview_show_monitor_overlay: bool = False,
+           # When True: use cheaper resampling and skip sharpening for a
+           # noticeably lighter CPU footprint (map looks slightly softer).
+           low_usage: bool = False) -> None:
     """Render one wallpaper frame and save it to `output_path`.
 
     Modes:
@@ -1147,6 +1161,7 @@ def render(output_path: str | Path, width: int, height: int,
                 map_id, twilight_width_deg, night_darkness, cloud_layer,
                 cloud_opacity, cloud_density, night_view, temp_units,
                 weather_by_city, earthquakes, hurricanes, hazard_style,
+                low_usage=low_usage,
             )
             lx = int(round((m.x - monitor_layout.virtual_x) * scale_x))
             ly = int(round((m.y - monitor_layout.virtual_y) * scale_y))
@@ -1187,7 +1202,7 @@ def render(output_path: str | Path, width: int, height: int,
             map_w, map_h, cities, when, sub_lat, sub_lon, map_id, center_lon,
             twilight_width_deg, night_darkness, cloud_layer, cloud_opacity,
             cloud_density, night_view, temp_units, weather_by_city,
-            earthquakes, hurricanes, hazard_style,
+            earthquakes, hurricanes, hazard_style, low_usage,
         )
         composite = _compose_multi_monitor(
             map_img, virtual_w, virtual_h, map_w, map_h, map_x, map_y,
@@ -1201,7 +1216,7 @@ def render(output_path: str | Path, width: int, height: int,
             width, height, cities, when, sub_lat, sub_lon, map_id, center_lon,
             twilight_width_deg, night_darkness, cloud_layer, cloud_opacity,
             cloud_density, night_view, temp_units, weather_by_city,
-            earthquakes, hurricanes, hazard_style,
+            earthquakes, hurricanes, hazard_style, low_usage,
         )
 
     # Preview-only overlay: dim off-monitor areas and outline monitors so

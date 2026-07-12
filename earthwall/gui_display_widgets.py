@@ -228,11 +228,9 @@ class ScreenAreaPreview(QWidget):
         p.setPen(QPen(_RED, 2))
         p.drawRect(map_rect)
         p.restore()
-        badge_x = int(max(self.rect().left() + 4,
-                          min(map_rect.x() + 4, self.rect().right() - 24)))
-        badge_y = int(max(self.rect().top() + 4,
-                          min(map_rect.y() + 4, self.rect().bottom() - 20)))
-        self._draw_badge(p, badge_x, badge_y, "1", _BADGE_BG)
+        # No badge on the map rectangle - the red outline is enough to
+        # identify it as the map area, and a "1" here was easy to confuse
+        # with the primary-monitor "1" badge nearby.
 
     def _draw_badge(self, p: QPainter, x: int, y: int, text: str,
                     bg: QColor) -> None:

@@ -113,10 +113,22 @@ class RenderWorker(QThread):
                 except Exception:
                     hurricanes = None
 
+            # In low-usage mode, cap the render resolution to 1920x1080
+            # (per axis) - the DE scales it up to the actual monitor size
+            # cheaply. A 4K render is 4x the pixels of 1080p, and the
+            # difference at wallpaper viewing distance is basically nil.
+            # Preview render size is already small, so we leave it alone.
+            r_w, r_h = self.width, self.height
+            if self.settings.get("low_usage_mode") and not self.is_preview:
+                cap = 1920
+                if r_w > cap:
+                    scale = cap / r_w
+                    r_w = cap
+                    r_h = max(1, int(round(self.height * scale)))
             render(
                 self.output_path,
-                self.width,
-                self.height,
+                r_w,
+                r_h,
                 self.cities,
                 when=datetime.now().astimezone(),
                 map_id=self.settings.get("map_set", "blue_marble_july"),
@@ -150,6 +162,7 @@ class RenderWorker(QThread):
                 hurricanes=hurricanes,
                 hazard_style=self.settings.get("hazard_style"),
                 preview_show_monitor_overlay=self.is_preview,
+                low_usage=bool(self.settings.get("low_usage_mode")),
             )
 
             if self.apply_wallpaper:
