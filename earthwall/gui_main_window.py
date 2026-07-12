@@ -95,7 +95,6 @@ class MainWindow(QMainWindow):
         self._refresh_city_table()
         self._restart_timer()
         self._initializing = False
-        self._refresh_focal_target_label()
 
         # Kick off a first render shortly after launch.
         QTimer.singleShot(500, self.trigger_update)
@@ -193,9 +192,9 @@ class MainWindow(QMainWindow):
         # theme does to widget heights, no setting can ever be cut off -
         # worst case a scrollbar appears instead.
         tabs.addTab(self._make_scrollable(self._build_general_tab()), "General")
-        tabs.addTab(self._make_scrollable(self._build_map_tab()), "Map && View")
+        tabs.addTab(self._make_scrollable(self._build_map_tab()), "Maps")
         tabs.addTab(self._make_scrollable(self._build_clouds_weather_tab()), "Clouds && Weather")
-        tabs.addTab(self._make_scrollable(self._build_displays_tab()), "Displays")
+        tabs.addTab(self._make_scrollable(self._build_displays_tab()), "Map View && Display")
         tabs.addTab(self._make_scrollable(self._build_cities_tab()), "Cities")
         root.addWidget(tabs, stretch=1)
 
@@ -527,72 +526,12 @@ class MainWindow(QMainWindow):
         map_btn_row.addStretch()
         layout.addLayout(map_btn_row)
 
-        # Map center: a draggable red-dot picker (moved here from the
-        # Displays tab). Dragging the dot sets which lon/lat sits at the
-        # middle of the map - the same job the old longitude slider did,
-        # but two-dimensional and direct. The preset buttons remain as
-        # quick jumps. The slider/spinbox still exist as hidden widgets
-        # so the rest of the code (and settings load/save) keeps working
-        # unchanged; the dot and the spinbox stay mirrored.
-        from .gui_display_widgets import MapFocalPointPreview
-        from . import maps as maps_module
-
-        center_box = QGroupBox("Map center — drag the red dot")
-        center_layout = QVBoxLayout(center_box)
-        center_layout.addWidget(QLabel(
-            "Drag the dot to choose the point at the centre of your map. "
-            "Left/right shifts longitude; up/down shifts latitude."
-        ))
-
-        map_thumb_path = None
-        try:
-            sets = maps_module.list_map_sets()
-            active = self.settings.get("map_set", "blue_marble_july")
-            if active in sets:
-                map_thumb_path = str(sets[active]["day_path"])
-            elif sets:
-                map_thumb_path = str(next(iter(sets.values()))["day_path"])
-        except Exception:
-            map_thumb_path = None
-
-        self.map_focal_preview = MapFocalPointPreview(map_path=map_thumb_path)
-        self.map_focal_preview.focal_changed.connect(self._on_map_focal_changed)
-        center_layout.addWidget(self.map_focal_preview)
-
-        # Small caption below the map showing WHICH map centre this
-        # widget is editing right now. In mirror/stretch modes it's
-        # global; in custom mode it's whichever monitor is currently
-        # selected in the Displays-tab "Editing monitor" dropdown - so
-        # the user isn't left guessing whose centre they just moved.
-        self.map_focal_target_label = QLabel("")
-        self.map_focal_target_label.setStyleSheet("color:#888; font-size:11px;")
-        self.map_focal_target_label.setAlignment(Qt.AlignCenter)
-        center_layout.addWidget(self.map_focal_target_label)
-
-        # Exact numeric entry for the dot's position, for users who want
-        # to type a precise longitude/latitude rather than drag. Kept in
-        # sync with the dot both ways: dragging updates these, editing
-        # these moves the dot. Longitude -180..180, latitude -90..90.
-        dot_xy_row = QHBoxLayout()
-        dot_xy_row.addWidget(QLabel("Longitude (X):"))
-        self.focal_lon_spin = QSpinBox()
-        self.focal_lon_spin.setRange(-180, 180)
-        self.focal_lon_spin.setSuffix("°")
-        self.focal_lon_spin.valueChanged.connect(self._on_focal_spin_changed)
-        dot_xy_row.addWidget(self.focal_lon_spin)
-        dot_xy_row.addSpacing(16)
-        dot_xy_row.addWidget(QLabel("Latitude (Y):"))
-        self.focal_lat_spin = QSpinBox()
-        self.focal_lat_spin.setRange(-90, 90)
-        self.focal_lat_spin.setSuffix("°")
-        self.focal_lat_spin.valueChanged.connect(self._on_focal_spin_changed)
-        dot_xy_row.addWidget(self.focal_lat_spin)
-        dot_xy_row.addStretch()
-        center_layout.addLayout(dot_xy_row)
-
-        # Hidden longitude slider/spinbox - kept for compatibility with
-        # existing load/save and the preset buttons; not shown in the UI
-        # now that the dot supersedes it.
+        # Map centre (longitude/latitude) now lives on the Map View &
+        # Display tab as a slider row - the draggable dot picker that
+        # used to sit here was removed in favour of that simpler control.
+        # We still keep hidden slider + spinbox widgets here so the
+        # settings load/save code below keeps working unchanged; they're
+        # invisible and never shown to the user.
         self.center_lon_slider = ClickJumpSlider(Qt.Horizontal)
         self.center_lon_slider.setRange(-180, 180)
         self.center_lon_spin = QSpinBox()
@@ -603,18 +542,6 @@ class MainWindow(QMainWindow):
         self.center_lon_slider.valueChanged.connect(self.center_lon_spin.setValue)
         self.center_lon_spin.valueChanged.connect(self.center_lon_slider.setValue)
         self.center_lon_spin.valueChanged.connect(self._on_settings_changed)
-
-        presets_row = QHBoxLayout()
-        presets_row.addWidget(QLabel("Jump to:"))
-        for label, lon in [("Americas", -90), ("Atlantic", 0),
-                            ("Asia", 100), ("Pacific / Australia", 150)]:
-            btn = QPushButton(label)
-            btn.clicked.connect(lambda _, v=lon: self._jump_center_lon(v))
-            presets_row.addWidget(btn)
-        presets_row.addStretch()
-        center_layout.addLayout(presets_row)
-
-        layout.addWidget(center_box)
 
         twilight_box = QGroupBox("Day/night edge softness")
         twilight_layout = QHBoxLayout(twilight_box)
@@ -757,6 +684,40 @@ class MainWindow(QMainWindow):
         # the map onto the (multi-)monitor desktop.
         map_area_box = QGroupBox("Map placement on desktop")
         map_area_layout = QVBoxLayout(map_area_box)
+
+        # Longitude view: scrolls which portion of the world sits in the
+        # middle of the map. Behaves like a horizontal scroll of the
+        # equirectangular map itself (wrapping around the antimeridian);
+        # doesn't change the map's SIZE or POSITION on the desktop, only
+        # WHICH SLICE of the world is centered. Both the main preview and
+        # the screen-area edit widget reflect the change live.
+        lon_row = QHBoxLayout()
+        lon_row.addWidget(QLabel("Longitude view:"))
+        self.longitude_view_slider = LabeledSlider(-180, 180, suffix="°", value=0)
+        self.longitude_view_slider.setToolTip(
+            "Scroll the map horizontally. 0° = Prime Meridian centered "
+            "(default equirectangular view); positive shifts view east; "
+            "negative shifts west. Wraps around the antimeridian.")
+        self.longitude_view_slider.valueChanged.connect(self._on_longitude_view_changed)
+        lon_row.addWidget(self.longitude_view_slider, stretch=1)
+        map_area_layout.addLayout(lon_row)
+
+        # Quick jumps for common regions - same set the removed presets
+        # buttons used to offer, kept because "get me to Australia in one
+        # click" is genuinely handy.
+        presets_row = QHBoxLayout()
+        presets_row.addWidget(QLabel("Jump to:"))
+        for label, lon in [("Americas", -90), ("Atlantic", 0),
+                            ("Asia", 100), ("Pacific / Australia", 150)]:
+            btn = QPushButton(label)
+            btn.clicked.connect(lambda _, v=lon: self.longitude_view_slider.setValue(v))
+            # setValue on a LabeledSlider is silent by design, so wire an
+            # explicit settings-change so the button click actually fires
+            # a preview refresh + save.
+            btn.clicked.connect(lambda _, v=lon: self._on_longitude_view_changed(v))
+            presets_row.addWidget(btn)
+        presets_row.addStretch()
+        map_area_layout.addLayout(presets_row)
 
         zoom_row = QHBoxLayout()
         zoom_row.addWidget(QLabel("Zoom:"))
@@ -1003,51 +964,41 @@ class MainWindow(QMainWindow):
         if self._raw_map_thumb is not None:
             self.screen_area_preview.set_map_thumbnail(self._raw_map_thumb)
 
-    def _on_map_focal_changed(self, lon: float, lat: float) -> None:
-        """Draggable red dot moved. In mirror/span the new focal updates
-        the global center_lon/center_lat (single map). In independent
-        mode it updates the currently-edited monitor's per-monitor
-        focal, leaving other monitors untouched."""
+    def _on_longitude_view_changed(self, lon: int) -> None:
+        """Longitude-view slider moved. In mirror/span, sets the global
+        center_lon (the value the renderer's _roll_longitude uses). In
+        independent (per-monitor) mode, sets the currently-edited
+        monitor's per-monitor center_lon so each screen can be aimed at
+        a different part of the world.
+
+        `center_lat` isn't touched anywhere in the UI now that the
+        two-axis focal dot is gone; it stays at whatever it was (default
+        0) so existing configs keep working, but it's no longer editable
+        through the interface. That was a deliberate simplification -
+        latitude shifting inside a fixed screen area produced weirdly-
+        cropped map framings that almost nobody wanted."""
         if self._initializing:
             return
+        lon = int(lon)
         mode = self.settings.get("monitors_mode", "mirror")
         if mode == "independent":
             from .monitors import monitor_config_for, set_monitor_config
             cfg = monitor_config_for(self.settings, self._active_monitor_index())
             cfg["center_lon"] = float(lon)
-            cfg["center_lat"] = float(lat)
             set_monitor_config(self.settings, self._active_monitor_index(), cfg)
         else:
-            # Mirror/span: mirror into the global fields AND the visible
-            # Map & View tab spinbox/slider so the two UIs stay in sync.
+            # Mirror into the (now hidden) legacy spinbox/slider too, so
+            # any code reading them keeps working.
             self.center_lon_spin.blockSignals(True)
-            self.center_lon_spin.setValue(int(round(lon)))
-            self.center_lon_slider.setValue(int(round(lon)))
+            self.center_lon_spin.setValue(lon)
+            self.center_lon_slider.setValue(lon)
             self.center_lon_spin.blockSignals(False)
             self.settings["center_lon"] = float(lon)
-            self.settings["center_lat"] = float(lat)
-        # Keep the numeric X/Y inputs in step with the dragged dot.
-        if hasattr(self, "focal_lon_spin"):
-            self.focal_lon_spin.blockSignals(True)
-            self.focal_lat_spin.blockSignals(True)
-            self.focal_lon_spin.setValue(int(round(lon)))
-            self.focal_lat_spin.setValue(int(round(lat)))
-            self.focal_lon_spin.blockSignals(False)
-            self.focal_lat_spin.blockSignals(False)
         settings_module.save_settings(self.settings)
+        # The screen-area preview draws its own map thumbnail (independent
+        # of the render worker), so re-roll it to reflect the new centre.
+        self._refresh_screen_area_thumb()
         self._schedule_preview_update()
-
-    def _on_focal_spin_changed(self, *_a) -> None:
-        """Longitude/latitude typed into the X/Y number inputs - move the
-        dot to match and route through the same focal-change logic as a
-        drag (so mirror vs independent mode is handled identically)."""
-        if self._initializing:
-            return
-        lon = float(self.focal_lon_spin.value())
-        lat = float(self.focal_lat_spin.value())
-        if hasattr(self, "map_focal_preview"):
-            self.map_focal_preview.set_focal(lon, lat)  # visual only, no signal
-        self._on_map_focal_changed(lon, lat)
 
     def _pick_void_fill_color(self) -> None:
         from PySide6.QtWidgets import QColorDialog
@@ -1131,19 +1082,12 @@ class MainWindow(QMainWindow):
             self.map_zoom_slider.setValue(int(cfg.get("zoom", 1.0) * 100))
             self.map_pos_x_spin.setValue(int(cfg.get("map_pos_x", 0)))
             self.map_pos_y_spin.setValue(int(cfg.get("map_pos_y", 0)))
-            self.map_focal_preview.set_focal(
-                cfg.get("center_lon", self.settings.get("center_lon", 0.0)),
-                cfg.get("center_lat", self.settings.get("center_lat", 0.0)),
-            )
-            self._refresh_void_fill_swatch()
-            # Also refresh the focal spinboxes and the Map & View tab's
-            # focal picker so they reflect this monitor's per-monitor
-            # centre.
-            if hasattr(self, "focal_lon_spin"):
-                self.focal_lon_spin.setValue(int(round(
+            # Longitude view slider reflects THIS monitor's centre in
+            # custom mode, or the global centre otherwise.
+            if hasattr(self, "longitude_view_slider"):
+                self.longitude_view_slider.setValue(int(round(
                     cfg.get("center_lon", self.settings.get("center_lon", 0.0)))))
-                self.focal_lat_spin.setValue(int(round(
-                    cfg.get("center_lat", self.settings.get("center_lat", 0.0)))))
+            self._refresh_void_fill_swatch()
         finally:
             self._initializing = False
         # In custom mode, switching the edit target changes what the
@@ -1152,36 +1096,94 @@ class MainWindow(QMainWindow):
             self.screen_area_preview.set_layout(
                 self._screen_area_layout(self._current_layout))
             self._update_screen_area_preview()
-        self._refresh_focal_target_label()
+            self._refresh_screen_area_thumb()
 
     def _ensure_raw_map_thumb(self) -> None:
         """Lazily load a small thumbnail of the RAW active day map (plain
-        equirectangular, no day/night, clouds, or void) for the Displays-
-        tab red-box preview. Cached and only reloaded when the selected
-        map changes, so it costs nothing on repeated preview refreshes."""
+        equirectangular, no day/night, clouds, or void) for the Map-View-
+        & Display-tab red-box preview, then roll it to reflect the
+        current longitude view so the thumbnail shown matches what the
+        renderer produces on the actual wallpaper.
+
+        Cached by (map_id, center_lon) so changing longitude only re-
+        rolls a small pixmap (cheap), and switching map source rebuilds
+        the base too."""
         active = self.settings.get("map_set", "blue_marble_july")
-        if getattr(self, "_raw_map_thumb_key", None) == active \
+        center_lon = int(round(self.settings.get("center_lon", 0.0)))
+        key = (active, center_lon)
+        if getattr(self, "_raw_map_thumb_key", None) == key \
                 and getattr(self, "_raw_map_thumb", None) is not None:
             return
-        self._raw_map_thumb = None
-        self._raw_map_thumb_key = active
-        try:
-            from . import maps as maps_module
-            sets = maps_module.list_map_sets()
-            path = None
-            if active in sets:
-                path = str(sets[active]["day_path"])
-            elif sets:
-                path = str(next(iter(sets.values()))["day_path"])
-            if path:
-                pm = QPixmap(path)
-                if not pm.isNull():
-                    # Downscale for cheap repeated painting; the preview
-                    # is tiny so full map resolution is wasted here.
-                    self._raw_map_thumb = pm.scaledToWidth(
-                        640, Qt.SmoothTransformation)
-        except Exception:
-            self._raw_map_thumb = None
+        # If only the longitude changed and we have a base pixmap for
+        # this map, re-roll from the cached base rather than reloading
+        # from disk (which is measurably slower).
+        base_key = (active, None)
+        base = getattr(self, "_raw_map_thumb_base", None)
+        if base is None or getattr(self, "_raw_map_thumb_base_key", None) != base_key:
+            base = None
+            try:
+                from . import maps as maps_module
+                sets = maps_module.list_map_sets()
+                path = None
+                if active in sets:
+                    path = str(sets[active]["day_path"])
+                elif sets:
+                    path = str(next(iter(sets.values()))["day_path"])
+                if path:
+                    pm = QPixmap(path)
+                    if not pm.isNull():
+                        # Downscale for cheap repeated painting; the
+                        # preview is tiny so full map resolution wasted.
+                        base = pm.scaledToWidth(
+                            640, Qt.SmoothTransformation)
+            except Exception:
+                base = None
+            self._raw_map_thumb_base = base
+            self._raw_map_thumb_base_key = base_key
+        self._raw_map_thumb_key = key
+        self._raw_map_thumb = self._roll_pixmap(base, center_lon) if base is not None else None
+
+    @staticmethod
+    def _roll_pixmap(pm: QPixmap, center_lon: float) -> QPixmap:
+        """Shift an equirectangular pixmap horizontally so `center_lon`
+        sits at the middle, wrapping the pixels that fall off the right
+        edge back around to the left. Matches render._roll_longitude
+        exactly, so the screen-area preview and the wallpaper renderer
+        always agree on which slice of the world is centered."""
+        if pm is None or pm.isNull() or center_lon == 0:
+            return pm
+        from PySide6.QtGui import QPainter
+        w = pm.width()
+        h = pm.height()
+        shift_px = int(round((center_lon / 360.0) * w))
+        # Normalise into [0, w). Positive center_lon shifts view east =
+        # source pixels move to the LEFT by shift_px, equivalent to a
+        # right-roll of (w - shift_px) at draw time.
+        shift_px = ((-shift_px) % w + w) % w
+        if shift_px == 0:
+            return pm
+        rolled = QPixmap(w, h)
+        rolled.fill(Qt.transparent)
+        p = QPainter(rolled)
+        # Right chunk of source -> left of result; left chunk -> right.
+        p.drawPixmap(0, 0, pm, w - shift_px, 0, shift_px, h)
+        p.drawPixmap(shift_px, 0, pm, 0, 0, w - shift_px, h)
+        p.end()
+        return rolled
+
+    def _refresh_screen_area_thumb(self) -> None:
+        """Force the screen-area preview to re-fetch (and re-roll for
+        the current longitude) its map thumbnail. Called whenever the
+        centre longitude changes so the widget stays in step with the
+        rest of the app."""
+        if not hasattr(self, "screen_area_preview"):
+            return
+        # Invalidate the cached (map, lon) key so the next ensure call
+        # rebuilds the rolled pixmap.
+        self._raw_map_thumb_key = None
+        self._ensure_raw_map_thumb()
+        if self._raw_map_thumb is not None:
+            self.screen_area_preview.set_map_thumbnail(self._raw_map_thumb)
 
     def _hazard_style(self) -> dict:
         """Current hazard_style dict from settings, filled with defaults."""
@@ -1266,28 +1268,6 @@ class MainWindow(QMainWindow):
                     self.hur_show_name_check, self.hur_show_track_check):
             wdt.blockSignals(False)
         self._refresh_hazard_swatches()
-
-    def _refresh_focal_target_label(self) -> None:
-        """Update the caption under the Map & View focal picker so it
-        always says whose centre the user is editing (global vs a
-        specific monitor in custom mode)."""
-        if not hasattr(self, "map_focal_target_label"):
-            return
-        mode = self.settings.get("monitors_mode", "mirror")
-        if mode == "independent":
-            idx = self._active_monitor_index()
-            layout = getattr(self, "_current_layout", None)
-            name = f"monitor {idx + 1}"
-            if layout is not None:
-                for m in layout.monitors:
-                    if m.index == idx:
-                        name = f"monitor {idx + 1} ({m.width}×{m.height})"
-                        break
-            self.map_focal_target_label.setText(
-                f"Editing centre for {name} — pick a different one on the Displays tab")
-        else:
-            self.map_focal_target_label.setText(
-                "Global map centre (mirror / stretch mode)")
 
     def _refresh_void_fill_swatch(self) -> None:
         from .monitors import monitor_config_for
@@ -1443,16 +1423,18 @@ class MainWindow(QMainWindow):
                 self.map_pos_y_spin.setValue(int(cfg.get("map_pos_y", 0)))
                 self.map_pos_y_spin.blockSignals(False)
             self._refresh_void_fill_swatch()
-        if hasattr(self, "map_focal_preview"):
-            self.map_focal_preview.set_focal(
-                s.get("center_lon", 0.0), s.get("center_lat", 0.0))
-        if hasattr(self, "focal_lon_spin"):
-            self.focal_lon_spin.blockSignals(True)
-            self.focal_lat_spin.blockSignals(True)
-            self.focal_lon_spin.setValue(int(round(s.get("center_lon", 0.0))))
-            self.focal_lat_spin.setValue(int(round(s.get("center_lat", 0.0))))
-            self.focal_lon_spin.blockSignals(False)
-            self.focal_lat_spin.blockSignals(False)
+        # Load the longitude-view slider from settings. In custom mode
+        # we prefer the active monitor's per-monitor centre if one is
+        # set, so switching modes keeps the slider showing whatever
+        # centre THIS mode uses.
+        if hasattr(self, "longitude_view_slider"):
+            lon_val = int(round(s.get("center_lon", 0.0)))
+            mode = s.get("monitors_mode", "mirror")
+            if mode == "independent":
+                cfg = (s.get("monitor_configs") or {}).get(
+                    str(self._active_monitor_index()), {})
+                lon_val = int(round(cfg.get("center_lon", lon_val)))
+            self.longitude_view_slider.setValue(lon_val)
 
         self.center_lon_spin.blockSignals(True)
         self.center_lon_spin.setValue(int(s["center_lon"]))
@@ -1564,8 +1546,6 @@ class MainWindow(QMainWindow):
                 self.screen_area_preview.set_layout(
                     self._screen_area_layout(self._current_layout))
                 self._update_screen_area_preview()
-            if mode_changed:
-                self._refresh_focal_target_label()
             # Switching INTO independent for the first time: reload the
             # UI controls from monitor 0's config so they reflect its
             # settings rather than whatever the last edit left.
@@ -1960,18 +1940,6 @@ class MainWindow(QMainWindow):
             self._worker.wait(5000)
         if self._preview_worker is not None and self._preview_worker.isRunning():
             self._preview_worker.wait(5000)
-
-    def _jump_center_lon(self, lon: int) -> None:
-        """Preset button: set the map centre longitude and keep the
-        draggable dot in sync. Latitude is left where it is (presets are
-        longitude-only 'jump to this region' shortcuts)."""
-        self.center_lon_spin.setValue(lon)
-        if hasattr(self, "map_focal_preview"):
-            _, cur_lat = self.map_focal_preview.focal()
-            self.map_focal_preview.set_focal(float(lon), cur_lat)
-        self.settings["center_lon"] = float(lon)
-        settings_module.save_settings(self.settings)
-        self._schedule_preview_update()
 
     def _preview_render_size(self) -> tuple[int, int]:
         """Preview render dimensions: fixed small width, height matching the
