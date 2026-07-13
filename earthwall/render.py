@@ -1100,20 +1100,11 @@ def _apply_monitor_overlay(img: Image.Image, layout, out_w: int, out_h: int,
         d.text((bx + (bw - tw) / 2, by + (bh - th) / 2 - 1),
                num_text, font=badge_font, fill=(255, 255, 255))
 
-    # 4. Red map-area outline (matches the Displays-tab edit widget). Any
-    #    subtle mismatch between where the map actually lands here vs.
-    #    where the edit widget predicts it becomes visible as two red
-    #    boxes that don't align.
-    if map_rect is not None:
-        mx, my, mw, mh = map_rect
-        # Clip so parts spilling off the canvas (zoom > 100%) don't error.
-        rx1 = max(0, mx)
-        ry1 = max(0, my)
-        rx2 = min(out_w - 1, mx + mw - 1)
-        ry2 = min(out_h - 1, my + mh - 1)
-        if rx2 > rx1 and ry2 > ry1:
-            d.rectangle([rx1, ry1, rx2, ry2],
-                        outline=(230, 50, 50), width=max(2, out_w // 700))
+    # 4. (Previously drew a red map-area outline here to mirror the edit
+    #    widget's red box. Removed - the outline was redundant now that
+    #    the tiled/void behaviour makes the map's extent obvious, and it
+    #    was drawing a distracting rectangle across otherwise-clean map
+    #    content.)
     return composited
 
 

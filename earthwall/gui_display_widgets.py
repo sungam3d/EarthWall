@@ -257,21 +257,11 @@ class ScreenAreaPreview(QWidget):
             self._draw_badge(p, int(r.x() + 4), int(r.y() + 4),
                              str(m.index + 1), QColor(90, 90, 100))
 
-        # ---- Layer 3: the red outline of the full map -----------------
-        # Always drawn last so the whole map's extent is visible even
-        # where it spills past the monitors (zoom > 100%). Clipped to the
-        # widget so a huge zoomed-in map's outline doesn't draw miles off
-        # into negative space, but the edges that fall within the widget
-        # still show.
-        p.save()
-        p.setClipRect(self.rect())
-        p.setBrush(Qt.NoBrush)
-        p.setPen(QPen(_RED, 2))
-        p.drawRect(map_rect)
-        p.restore()
-        # No badge on the map rectangle - the red outline is enough to
-        # identify it as the map area, and a "1" here was easy to confuse
-        # with the primary-monitor "1" badge nearby.
+        # (Previously drew a red outline around the full map area here.
+        # Removed - it doubled up with the visible map/void boundary and
+        # created a distracting rectangle across otherwise-clean map
+        # content. The map's extent is already obvious from where the
+        # map thumbnail vs the monitor-grey backgrounds show through.)
 
     def _draw_badge(self, p: QPainter, x: int, y: int, text: str,
                     bg: QColor) -> None:

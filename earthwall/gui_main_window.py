@@ -2303,19 +2303,21 @@ class MainWindow(QMainWindow):
         max_h = max(180, min(360, self.height() // 3))
         rw, rh = self._current_resolution()
         aspect = rh / max(1, rw)  # follow the real wallpaper's shape
-        target_h = int(available_w * aspect)
-        # When the natural height exceeds max_h (very wide multi-monitor
-        # layouts), don't just cap the height - also cap the WIDTH so the
-        # container keeps the same aspect as the wallpaper. Otherwise the
-        # pixmap gets letterboxed inside a too-wide container and users
-        # see a dark border on the sides.
-        if target_h > max_h:
+        natural_h = int(available_w * aspect)
+        # Container has BOTH width and height fixed so the AlignHCenter
+        # in the parent layout has something to centre. If we only set
+        # setMaximumWidth (as an earlier version did), AlignHCenter
+        # shrinks the widget to its size hint - which for an unset-width
+        # container is 1px - and the preview collapsed to a vertical
+        # sliver. Fixing both dimensions to the correct aspect-preserving
+        # size avoids that trap.
+        if natural_h <= max_h:
+            target_w = available_w
+            target_h = natural_h
+        else:
             target_h = max_h
             target_w = max(320, min(available_w, int(target_h / max(0.001, aspect))))
-            self.preview_container.setMaximumWidth(target_w)
-        else:
-            self.preview_container.setMaximumWidth(16777215)  # QWIDGETSIZE_MAX (uncapped)
-        self.preview_container.setFixedHeight(max(120, target_h))
+        self.preview_container.setFixedSize(target_w, max(120, target_h))
 
     def _tick_spinner(self) -> None:
         """Animate the first-load placeholder. Runs until the first preview
