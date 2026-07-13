@@ -96,6 +96,21 @@ class MainWindow(QMainWindow):
         self._restart_timer()
         self._initializing = False
 
+        # Monitor detection has to happen before the first render, and it
+        # can't wait for showEvent - if the user has "Start in tray" on
+        # (or their DE hides the window for any other reason on launch),
+        # showEvent may not fire before trigger_update at 500ms. Without
+        # a layout, render() falls through to the classic single-image
+        # path that ignores every Map View & Display setting - the
+        # symptom users reported ("startup ignores my settings, only
+        # Update Now respects them"). Doing detection here means the
+        # first render always has the right layout. showEvent still
+        # calls _refresh_monitor_layout defensively; it's guarded to
+        # only run once.
+        self._refresh_monitor_layout()
+        self._install_hotplug_watchers()
+        self._monitors_detected_once = True
+
         # Kick off a first render shortly after launch.
         QTimer.singleShot(500, self.trigger_update)
 
@@ -1611,8 +1626,17 @@ class MainWindow(QMainWindow):
         if mode in ("span", "independent"):
             return layout
         cfg = (self.settings.get("monitor_configs") or {}).get("0", {})
-        if cfg.get("zoom", 1.0) != 1.0 or cfg.get("map_pos_x", 0) != 0 \
-                or cfg.get("map_pos_y", 0) != 0:
+        # Any per-monitor setting that CAN'T be expressed by the plain
+        # mirror render path forces the synthetic-layout path so the
+        # setting actually takes effect. Kept in sync with what the
+        # Map View & Display tab exposes; adding a new per-monitor
+        # setting means adding it here too.
+        if (cfg.get("zoom", 1.0) != 1.0
+                or cfg.get("map_pos_x", 0) != 0
+                or cfg.get("map_pos_y", 0) != 0
+                or cfg.get("tile_map", False)
+                or cfg.get("void_fill_color", "#000000") != "#000000"
+                or cfg.get("void_fill_image")):
             # Mirror mode with a zoom/offset: the placement math in
             # render() composes the map onto a virtual-desktop-sized
             # canvas. That canvas MUST match the actual render resolution
