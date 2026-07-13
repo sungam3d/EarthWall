@@ -167,7 +167,12 @@ class MainWindow(QMainWindow):
         self.progress.hide()
         self.progress.raise_()
 
-        preview_layout.addWidget(self.preview_container)
+        # Centered horizontally so that when the container's max-width is
+        # capped (very wide multi-monitor setups where the natural preview
+        # height would push past our max_h and we shrink the width to keep
+        # the pixmap aspect) it sits in the middle of the group box, not
+        # hugging the left edge.
+        preview_layout.addWidget(self.preview_container, alignment=Qt.AlignHCenter)
 
         preview_btn_row = QHBoxLayout()
         self.status_label = QLabel("Not updated yet")
