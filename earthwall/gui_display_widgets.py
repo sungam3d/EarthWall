@@ -62,6 +62,11 @@ class ScreenAreaPreview(QWidget):
         # paint inside the map area, giving a proper "here's what it will
         # look like on your desktop" impression.
         self._map_thumb: QPixmap | None = None
+        # Whether to tile the map thumbnail horizontally when drawing
+        # (mirrors render.py's tile_map for ultrawide monitors). Off by
+        # default; the main window flips this on when the current
+        # monitor's config has tile_map=True.
+        self._tile_map: bool = False
         self.setMinimumHeight(180)
         # heightForWidth: the widget takes a height that matches the
         # virtual-desktop's aspect ratio. That way the layout fills the
@@ -100,6 +105,42 @@ class ScreenAreaPreview(QWidget):
     def set_map_thumbnail(self, pixmap: QPixmap | None) -> None:
         self._map_thumb = pixmap
         self.update()
+
+    def set_tile_map(self, tile: bool) -> None:
+        """Turn horizontal tiling of the map thumbnail on/off. Mirrors
+        the render-time tile_map option so the screen-area preview and
+        the actual wallpaper show the same tiled/void appearance."""
+        tile = bool(tile)
+        if tile != self._tile_map:
+            self._tile_map = tile
+            self.update()
+
+    def _draw_map_at(self, p, map_rect):
+        """Paint the map thumbnail into `map_rect`, and (if tile mode is
+        on) additional copies to the left and right until the widget's
+        full width is covered. Callers are responsible for setClipRect /
+        setOpacity around this call - this helper only paints."""
+        if self._map_thumb is None or self._map_thumb.isNull():
+            return
+        p.drawPixmap(map_rect.toRect(), self._map_thumb)
+        if not self._tile_map:
+            return
+        w = self.width()
+        mw = map_rect.width()
+        if mw <= 0:
+            return
+        # Tile left.
+        x = map_rect.x() - mw
+        while x + mw > 0:
+            tile_rect = map_rect.translated(x - map_rect.x(), 0)
+            p.drawPixmap(tile_rect.toRect(), self._map_thumb)
+            x -= mw
+        # Tile right.
+        x = map_rect.x() + mw
+        while x < w:
+            tile_rect = map_rect.translated(x - map_rect.x(), 0)
+            p.drawPixmap(tile_rect.toRect(), self._map_thumb)
+            x += mw
 
     # ----- painting ----------------------------------------------------
     def _fit_transform(self) -> tuple[float, float, float]:
@@ -188,7 +229,7 @@ class ScreenAreaPreview(QWidget):
         p.setClipRect(self.rect())
         if self._map_thumb is not None and not self._map_thumb.isNull():
             p.setOpacity(0.35)
-            p.drawPixmap(map_rect.toRect(), self._map_thumb)
+            self._draw_map_at(p, map_rect)
             p.setOpacity(1.0)
         p.restore()
 
@@ -208,7 +249,7 @@ class ScreenAreaPreview(QWidget):
             for r in mon_rects:
                 p.save()
                 p.setClipRect(r)
-                p.drawPixmap(map_rect.toRect(), self._map_thumb)
+                self._draw_map_at(p, map_rect)
                 p.restore()
 
         # Monitor number badges on top of the map slice.

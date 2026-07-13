@@ -153,6 +153,8 @@ class RenderWorker(QThread):
                 # layout we're rendering onto (its virtual dimensions).
                 map_pos_x=self._pos_fraction("map_pos_x", axis="x"),
                 map_pos_y=self._pos_fraction("map_pos_y", axis="y"),
+                tile_map=bool((self.settings.get("monitor_configs", {})
+                               .get("0", {}).get("tile_map", False))),
                 void_fill_color=(self.settings.get("monitor_configs", {})
                                  .get("0", {}).get("void_fill_color", "#000000")),
                 void_fill_image=(self.settings.get("monitor_configs", {})

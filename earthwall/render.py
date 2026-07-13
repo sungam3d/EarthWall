@@ -801,7 +801,8 @@ def _load_void_fill(color_hex: str, image_path: str | None,
 
 def _compose_multi_monitor(map_img: Image.Image, virtual_w: int, virtual_h: int,
                             map_w: int, map_h: int, map_x: int, map_y: int,
-                            void_color: str, void_image: str | None) -> Image.Image:
+                            void_color: str, void_image: str | None,
+                            tile_map: bool = False) -> Image.Image:
     """Place a rendered map onto a virtual-desktop-sized canvas.
 
     `map_img` has already been rendered at (map_w, map_h). This function
@@ -810,11 +811,20 @@ def _compose_multi_monitor(map_img: Image.Image, virtual_w: int, virtual_h: int,
 
     If the map fully covers the virtual desktop we skip the void layer
     entirely - saves memory and one Image allocation per render at the
-    common 1.0x zoom / no offset case."""
+    common 1.0x zoom / no offset case.
+
+    `tile_map`: when True, repeat the map horizontally to the left and
+    right of its placement until the whole canvas width is covered.
+    This is exactly what an equirectangular projection expects - the
+    right edge of the map is the same longitude as the left edge, so
+    the seam is invisible. Vertical tiling isn't meaningful (poles) so
+    it isn't offered. Perfect for ultrawide monitors where a natural
+    2:1 map leaves horizontal void bars that the user would rather see
+    filled with more map."""
     fully_covers = (map_x <= 0 and map_y <= 0
                     and map_x + map_w >= virtual_w
                     and map_y + map_h >= virtual_h)
-    if fully_covers:
+    if fully_covers and not tile_map:
         # Just crop the map to the desktop rect - no void ever visible.
         crop_left = -map_x
         crop_top = -map_y
@@ -823,6 +833,18 @@ def _compose_multi_monitor(map_img: Image.Image, virtual_w: int, virtual_h: int,
 
     canvas = _load_void_fill(void_color, void_image, (virtual_w, virtual_h))
     canvas.paste(map_img, (map_x, map_y))
+    if tile_map and map_w > 0:
+        # Tile to the left: each copy `map_w` further left than the last,
+        # stop once no part of the copy would land on the canvas.
+        x = map_x - map_w
+        while x + map_w > 0:
+            canvas.paste(map_img, (x, map_y))
+            x -= map_w
+        # Tile to the right, same idea.
+        x = map_x + map_w
+        while x < virtual_w:
+            canvas.paste(map_img, (x, map_y))
+            x += map_w
     return canvas
 
 
@@ -910,6 +932,7 @@ def _render_monitor_view(monitor, monitor_config: dict, global_center_lon: float
     zoom = monitor_config.get("zoom", 1.0)
     m_lon = monitor_config.get("center_lon", global_center_lon)
     m_lat = monitor_config.get("center_lat", global_center_lat)
+    tile_map = bool(monitor_config.get("tile_map", False))
     mw, mh = monitor.width, monitor.height
     # Per-monitor position offset (from that monitor's map_pos_x/y
     # spinboxes). Stored in the config as PIXELS relative to the real
@@ -923,6 +946,46 @@ def _render_monitor_view(monitor, monitor_config: dict, global_center_lon: float
     real_h = getattr(monitor, "_m", monitor).height
     pos_x_frac = monitor_config.get("map_pos_x", 0) / max(1, real_w)
     pos_y_frac = monitor_config.get("map_pos_y", 0) / max(1, real_h)
+
+    # ---- Tile-map branch ------------------------------------------
+    # Render the map at its natural 2:1 equirectangular aspect fit to
+    # the monitor's HEIGHT (not stretched to the monitor's width) and
+    # then paste-tile it horizontally across the monitor. This is what
+    # the user wants for ultrawides: no distortion, and the horizontal
+    # blank space that "fit to height" would otherwise leave is filled
+    # with more map instead of void. Vertical placement, focal lat,
+    # position offsets, and void fill still all apply below.
+    if tile_map:
+        fit_h_native = max(1, int(round(mh * zoom)))
+        fit_w_native = fit_h_native * 2
+        img = _render_map_image(
+            fit_w_native, fit_h_native, cities, when, sub_lat, sub_lon,
+            map_id, m_lon, twilight_width_deg, night_darkness,
+            cloud_layer, cloud_opacity, cloud_density,
+            night_view, temp_units, weather_by_city,
+            earthquakes, hurricanes, hazard_style,
+            low_usage=low_usage)
+        off_x = int(round(pos_x_frac * mw))
+        off_y = int(round(pos_y_frac * mh))
+        canvas = _load_void_fill(
+            monitor_config.get("void_fill_color", "#000000"),
+            monitor_config.get("void_fill_image"),
+            (mw, mh))
+        base_y = (mh - fit_h_native) // 2 \
+                 + int(round(m_lat / 90.0 * (mh - fit_h_native) / 2)) + off_y
+        base_x = (mw - fit_w_native) // 2 + off_x
+        canvas.paste(img, (base_x, base_y))
+        # Tile horizontally left and right until the monitor is covered.
+        x = base_x - fit_w_native
+        while x + fit_w_native > 0:
+            canvas.paste(img, (x, base_y))
+            x -= fit_w_native
+        x = base_x + fit_w_native
+        while x < mw:
+            canvas.paste(img, (x, base_y))
+            x += fit_w_native
+        return canvas
+
     render_w = max(1, int(round(mw * zoom)))
     render_h = max(1, int(round(mh * zoom)))
 
@@ -1090,6 +1153,12 @@ def render(output_path: str | Path, width: int, height: int,
            # Displays tab position spinboxes write.
            map_pos_x: int = 0,
            map_pos_y: int = 0,
+           # Tile the equirectangular map horizontally to fill blank
+           # horizontal space instead of showing the void fill. Great
+           # for ultrawide monitors where a natural-aspect 2:1 map
+           # otherwise leaves black bars on the sides. Vertical tiling
+           # isn't offered - the poles would repeat, which nobody wants.
+           tile_map: bool = False,
            void_fill_color: str = "#000000",
            void_fill_image: str | None = None,
            # Full per-monitor config dict (only read in independent mode).
@@ -1206,7 +1275,7 @@ def render(output_path: str | Path, width: int, height: int,
         )
         composite = _compose_multi_monitor(
             map_img, virtual_w, virtual_h, map_w, map_h, map_x, map_y,
-            void_fill_color, void_fill_image,
+            void_fill_color, void_fill_image, tile_map=tile_map,
         )
         map_rect_for_overlay = (map_x, map_y, map_w, map_h)
 

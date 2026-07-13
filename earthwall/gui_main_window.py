@@ -765,6 +765,24 @@ class MainWindow(QMainWindow):
         zoom_row.addWidget(self.map_zoom_slider, stretch=1)
         map_area_layout.addLayout(zoom_row)
 
+        # Tile map: fills leftover horizontal space with more of the
+        # equirectangular map instead of void colour. Especially useful
+        # on ultrawide monitors (21:9, 32:9) where a natural 2:1 map
+        # leaves noticeable side bars. Seamless because the right edge
+        # of the map is the same longitude as the left edge - tiling is
+        # exactly what unrolling the globe more times looks like.
+        # Per-monitor setting so custom-mode users can enable it just
+        # on the ultrawide screen and leave 16:9 screens alone.
+        self.tile_map_check = QCheckBox(
+            "Tile map horizontally to fill blank horizontal space "
+            "(great for ultrawide monitors)")
+        self.tile_map_check.setToolTip(
+            "When on, the map is drawn at its natural 2:1 aspect and "
+            "repeated left/right to cover any horizontal void. Doesn't "
+            "tile vertically - that would repeat the poles.")
+        self.tile_map_check.toggled.connect(self._on_settings_changed)
+        map_area_layout.addWidget(self.tile_map_check)
+
         # Void fill: colour picker for the area outside the map when the
         # map doesn't cover the full virtual desktop (zoomed in, or
         # diagonal monitor layout with gaps).
@@ -966,6 +984,9 @@ class MainWindow(QMainWindow):
             return
         idx = self._active_monitor_index()
         cfg = (self.settings.get("monitor_configs") or {}).get(str(idx), {})
+        # Keep the edit widget in sync with tile_map so it tiles the
+        # thumbnail exactly how the render will tile the actual map.
+        self.screen_area_preview.set_tile_map(bool(cfg.get("tile_map", False)))
         zoom = self.map_zoom_slider.value() / 100.0
         mode = self.settings.get("monitors_mode", "mirror")
         # The screen-area preview widget was filtered per mode
@@ -1170,6 +1191,8 @@ class MainWindow(QMainWindow):
             self.map_zoom_slider.setValue(int(cfg.get("zoom", 1.0) * 100))
             self.map_pos_x_spin.setValue(int(cfg.get("map_pos_x", 0)))
             self.map_pos_y_spin.setValue(int(cfg.get("map_pos_y", 0)))
+            if hasattr(self, "tile_map_check"):
+                self.tile_map_check.setChecked(bool(cfg.get("tile_map", False)))
             # Longitude view slider reflects THIS monitor's centre in
             # custom mode, or the global centre otherwise.
             if hasattr(self, "longitude_view_slider"):
@@ -1513,6 +1536,10 @@ class MainWindow(QMainWindow):
                 self.map_pos_y_spin.blockSignals(True)
                 self.map_pos_y_spin.setValue(int(cfg.get("map_pos_y", 0)))
                 self.map_pos_y_spin.blockSignals(False)
+            if hasattr(self, "tile_map_check"):
+                self.tile_map_check.blockSignals(True)
+                self.tile_map_check.setChecked(bool(cfg.get("tile_map", False)))
+                self.tile_map_check.blockSignals(False)
             self._refresh_void_fill_swatch()
         # Load the longitude-view slider from settings. In custom mode
         # we prefer the active monitor's per-monitor centre if one is
@@ -1656,6 +1683,8 @@ class MainWindow(QMainWindow):
             if hasattr(self, "map_pos_x_spin"):
                 cfg["map_pos_x"] = int(self.map_pos_x_spin.value())
                 cfg["map_pos_y"] = int(self.map_pos_y_spin.value())
+            if hasattr(self, "tile_map_check"):
+                cfg["tile_map"] = self.tile_map_check.isChecked()
             set_monitor_config(self.settings, self._active_monitor_index(), cfg)
             self._update_screen_area_preview()
         self.settings["center_lon"] = float(self.center_lon_spin.value())
