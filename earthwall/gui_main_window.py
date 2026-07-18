@@ -578,9 +578,16 @@ class MainWindow(QMainWindow):
         map_btn_row = QHBoxLayout()
         import_btn = QPushButton("Import New Map…")
         import_btn.clicked.connect(self._on_import_map)
+        download_btn = QPushButton("Download NASA Maps…")
+        download_btn.setToolTip(
+            "Fetch extra Earth maps from NASA on demand - seasonal Blue "
+            "Marble months and night lights. Keeps the app small by only "
+            "downloading what you want.")
+        download_btn.clicked.connect(self._on_download_maps)
         self.delete_map_btn = QPushButton("Delete Selected")
         self.delete_map_btn.clicked.connect(self._on_delete_map)
         map_btn_row.addWidget(import_btn)
+        map_btn_row.addWidget(download_btn)
         map_btn_row.addWidget(self.delete_map_btn)
         map_btn_row.addStretch()
         layout.addLayout(map_btn_row)
@@ -1788,6 +1795,16 @@ class MainWindow(QMainWindow):
             self._refresh_map_list()
             self.settings["map_set"] = map_id
             settings_module.save_settings(self.settings)
+            self._schedule_preview_update()
+
+    def _on_download_maps(self) -> None:
+        from .gui_map_download_dialog import MapDownloadDialog
+        dialog = MapDownloadDialog(self)
+        dialog.exec()
+        # Whether the user hit Close or the dialog finished, refresh the
+        # list if anything new landed so the downloaded maps appear.
+        if dialog.downloaded_any():
+            self._refresh_map_list()
             self._schedule_preview_update()
 
     def _on_delete_map(self) -> None:

@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from .city_database import CITY_DATABASE, search_cities
+from .city_database import CITY_DATABASE, search_cities, city_label, find_city
 from . import fonts as fonts_module
 from .gui_widgets import ClickJumpSlider
 
@@ -181,12 +181,21 @@ class CityDialog(QDialog):
         layout.addWidget(search_label)
 
         self.search_box = QLineEdit()
-        self.search_box.setPlaceholderText("Type a city name…")
-        completer_names = sorted({c[0] for c in CITY_DATABASE})
-        completer = QCompleter(completer_names)
+        self.search_box.setPlaceholderText("Type a city name…  (e.g. \"Paris\" or \"Japan\")")
+        # Completer shows "City, Country" so identically-named places are
+        # distinguishable. Model is the full label list; QCompleter does
+        # its own case-insensitive substring filtering as the user types.
+        self._city_labels = [city_label(c) for c in CITY_DATABASE]
+        completer = QCompleter(self._city_labels)
         completer.setCaseSensitivity(Qt.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchContains)
+        completer.setMaxVisibleItems(12)
         completer.activated.connect(self._on_pick_from_search)
         self.search_box.setCompleter(completer)
+        # Enter in the box (without picking a completion) resolves the
+        # top search hit, so keyboard users aren't forced to mouse into
+        # the dropdown.
+        self.search_box.returnPressed.connect(self._on_search_enter)
         layout.addWidget(self.search_box)
 
         tabs = QTabWidget()
@@ -566,17 +575,31 @@ class CityDialog(QDialog):
             self._update_marker_color_preview()
 
     def _on_pick_from_search(self, text: str) -> None:
-        matches = [c for c in CITY_DATABASE if c[0] == text]
-        if not matches:
-            matches = search_cities(text, limit=1)
-        if not matches:
+        """User chose an entry from the completer dropdown. `text` is a
+        'City, Country' label; resolve it back to the database row and
+        fill in the Basics fields."""
+        city = find_city(text)
+        if city is None:
+            city = search_cities(text, limit=1)
+            city = city[0] if city else None
+        if city is None:
             return
-        name, country, lat, lon, tz = matches[0]
+        name, country, lat, lon, tz = city
         self.name_edit.setText(name)
         self.lat_spin.setValue(lat)
         self.lon_spin.setValue(lon)
         if tz in ALL_TIMEZONES:
             self.tz_combo.setCurrentText(tz)
+
+    def _on_search_enter(self) -> None:
+        """Enter pressed in the search box without picking a dropdown
+        row: resolve the best match for whatever's typed so far."""
+        text = self.search_box.text().strip()
+        if not text:
+            return
+        results = search_cities(text, limit=1)
+        if results:
+            self._on_pick_from_search(city_label(results[0]))
 
     def result_city(self) -> dict:
         # Collect any non-blank weather label overrides.
