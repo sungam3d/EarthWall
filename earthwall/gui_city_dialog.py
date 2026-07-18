@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from .city_database import CITY_DATABASE, search_cities, city_label, find_city
+from .city_database import search_cities, city_label, find_city
 from . import fonts as fonts_module
 from .gui_widgets import ClickJumpSlider
 
@@ -181,17 +181,30 @@ class CityDialog(QDialog):
         layout.addWidget(search_label)
 
         self.search_box = QLineEdit()
-        self.search_box.setPlaceholderText("Type a city name…  (e.g. \"Paris\" or \"Japan\")")
-        # Completer shows "City, Country" so identically-named places are
-        # distinguishable. Model is the full label list; QCompleter does
-        # its own case-insensitive substring filtering as the user types.
-        self._city_labels = [city_label(c) for c in CITY_DATABASE]
-        completer = QCompleter(self._city_labels)
+        self.search_box.setPlaceholderText("Type a city name…  (e.g. \"Lake Jackson\" or \"Springfield IL\")")
+        # With ~32k cities in the database, a static completer with
+        # MatchContains would filter the whole list on every keystroke
+        # (visibly slow). Instead we run our ranked search_cities() on
+        # textChanged and feed only the top ~40 hits into the completer's
+        # model - so the dropdown is smart, fast, and shows "Lake Jackson,
+        # Texas, United States" style disambiguated labels.
+        from PySide6.QtCore import QStringListModel
+        self._completer_model = QStringListModel([])
+        completer = QCompleter(self._completer_model, self.search_box)
         completer.setCaseSensitivity(Qt.CaseInsensitive)
-        completer.setFilterMode(Qt.MatchContains)
+        # Use UnfilteredPopupCompletion so our model IS the shown list,
+        # rather than QCompleter trying to further prefix-filter our
+        # already-filtered results.
+        completer.setCompletionMode(QCompleter.UnfilteredPopupCompletion)
         completer.setMaxVisibleItems(12)
         completer.activated.connect(self._on_pick_from_search)
         self.search_box.setCompleter(completer)
+        self.search_box.textEdited.connect(self._on_search_typed)
+        # Pre-warm the city database in the background so the first
+        # keystroke isn't ~130 ms slower than the rest (JSON decode + fold
+        # cache build the first time search_cities() is called).
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(0, lambda: search_cities("."))
         # Enter in the box (without picking a completion) resolves the
         # top search hit, so keyboard users aren't forced to mouse into
         # the dropdown.
@@ -574,6 +587,17 @@ class CityDialog(QDialog):
             self._marker_color = color
             self._update_marker_color_preview()
 
+    def _on_search_typed(self, text: str) -> None:
+        """User typed in the search box - run our ranked search and feed
+        the top hits into the completer's model. Small (< 100 items) so
+        Qt renders the popup instantly."""
+        text = text.strip()
+        if not text:
+            self._completer_model.setStringList([])
+            return
+        hits = search_cities(text, limit=40)
+        self._completer_model.setStringList([city_label(c) for c in hits])
+
     def _on_pick_from_search(self, text: str) -> None:
         """User chose an entry from the completer dropdown. `text` is a
         'City, Country' label; resolve it back to the database row and
@@ -584,7 +608,13 @@ class CityDialog(QDialog):
             city = city[0] if city else None
         if city is None:
             return
-        name, country, lat, lon, tz = city
+        # Row format is (name, country, admin, lat, lon, tz). Admin is
+        # only present on rows we ship an admin code for; the search
+        # returns whichever shape the database is in.
+        name = city[0]
+        lat = city[-3]
+        lon = city[-2]
+        tz = city[-1]
         self.name_edit.setText(name)
         self.lat_spin.setValue(lat)
         self.lon_spin.setValue(lon)

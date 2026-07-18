@@ -35,35 +35,44 @@ _last_attempt: dict[tuple, float] = {}
 # Open-Meteo's WMO weather-code -> (label, emoji) mapping. Only the codes
 # it actually returns are included; anything else falls back to a neutral
 # placeholder rather than an "unknown code" error.
+#
+# Glyph choice: we use ONLY characters from the Basic Multilingual Plane
+# (U+2600 - U+27FF, "Miscellaneous Symbols") that DejaVu Sans, Noto Sans,
+# and Liberation Sans all include. The emoji-style U+1F3xx codepoints
+# (🌤 🌦 🌧 etc) look nicer on systems that ship an emoji font, but on
+# most Linux desktops they render as a `.notdef` box - which showed up
+# as the "square where the icon should be" bug users hit for "Mostly
+# clear" and other WMO codes 45+. These monochrome BMP glyphs render
+# reliably everywhere.
 _WMO_CODES = {
-    0:  ("Clear", "☀"),
-    1:  ("Mostly clear", "🌤"),
-    2:  ("Partly cloudy", "⛅"),
-    3:  ("Overcast", "☁"),
-    45: ("Fog", "🌫"),
-    48: ("Rime fog", "🌫"),
-    51: ("Light drizzle", "🌦"),
-    53: ("Drizzle", "🌦"),
-    55: ("Heavy drizzle", "🌧"),
-    56: ("Freezing drizzle", "🌧"),
-    57: ("Freezing drizzle", "🌧"),
-    61: ("Light rain", "🌦"),
-    63: ("Rain", "🌧"),
-    65: ("Heavy rain", "🌧"),
-    66: ("Freezing rain", "🌧"),
-    67: ("Freezing rain", "🌧"),
-    71: ("Light snow", "🌨"),
-    73: ("Snow", "🌨"),
-    75: ("Heavy snow", "❄"),
-    77: ("Snow grains", "🌨"),
-    80: ("Rain showers", "🌦"),
-    81: ("Rain showers", "🌧"),
-    82: ("Heavy showers", "⛈"),
-    85: ("Snow showers", "🌨"),
-    86: ("Snow showers", "❄"),
-    95: ("Thunderstorm", "⛈"),
-    96: ("Thunderstorm + hail", "⛈"),
-    99: ("Thunderstorm + hail", "⛈"),
+    0:  ("Clear", "\u2600"),            # ☀ sun
+    1:  ("Mostly clear", "\u2600"),     # ☀ sun (clear enough)
+    2:  ("Partly cloudy", "\u26C5"),    # ⛅ sun behind cloud (Misc Symbols)
+    3:  ("Overcast", "\u2601"),         # ☁ cloud
+    45: ("Fog", "\u2601"),              # ☁ cloud (fog has no BMP glyph)
+    48: ("Rime fog", "\u2601"),
+    51: ("Light drizzle", "\u2602"),    # ☂ umbrella
+    53: ("Drizzle", "\u2602"),
+    55: ("Heavy drizzle", "\u2614"),    # ☔ umbrella with rain
+    56: ("Freezing drizzle", "\u2614"),
+    57: ("Freezing drizzle", "\u2614"),
+    61: ("Light rain", "\u2602"),
+    63: ("Rain", "\u2614"),
+    65: ("Heavy rain", "\u2614"),
+    66: ("Freezing rain", "\u2614"),
+    67: ("Freezing rain", "\u2614"),
+    71: ("Light snow", "\u2744"),       # ❄ snowflake
+    73: ("Snow", "\u2744"),
+    75: ("Heavy snow", "\u2744"),
+    77: ("Snow grains", "\u2744"),
+    80: ("Rain showers", "\u2614"),
+    81: ("Rain showers", "\u2614"),
+    82: ("Heavy showers", "\u26A1"),    # ⚡ high voltage (heavy weather)
+    85: ("Snow showers", "\u2744"),
+    86: ("Snow showers", "\u2744"),
+    95: ("Thunderstorm", "\u26A1"),     # ⚡ lightning
+    96: ("Thunderstorm + hail", "\u26A1"),
+    99: ("Thunderstorm + hail", "\u26A1"),
 }
 
 

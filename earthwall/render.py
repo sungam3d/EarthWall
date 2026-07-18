@@ -28,12 +28,44 @@ from . import maps as maps_module
 _MAP_CACHE: dict[str, tuple[Image.Image, Image.Image]] = {}
 
 
+SEASONAL_AUTO_ID = "seasonal_auto"
+
+
+def _resolve_seasonal(map_id: str, available: dict) -> str:
+    """When the user picks the special "seasonal_auto" map, pick the
+    Blue Marble month matching the current calendar month. If that
+    specific month hasn't been downloaded yet, fall back through the
+    nearest month that IS installed, so the app never fails to render
+    just because the user hasn't grabbed every month yet."""
+    if map_id != SEASONAL_AUTO_ID:
+        return map_id
+    from datetime import datetime
+    month = datetime.now().month
+    preferred = f"bmng_{month:02d}"
+    if preferred in available:
+        return preferred
+    # Fall back: try the same month name if a downloaded set uses a
+    # slightly different key, then walk outward from this month looking
+    # for any installed bmng_MM, then finally any installed map.
+    for offset in range(1, 7):
+        for delta in (offset, -offset):
+            m = ((month - 1 + delta) % 12) + 1
+            candidate = f"bmng_{m:02d}"
+            if candidate in available:
+                return candidate
+    # No BMNG month at all - use whatever's installed.
+    return next(iter(available)) if available else map_id
+
+
 def _load_maps(map_id: str) -> tuple[Image.Image, Image.Image]:
+    available = maps_module.list_map_sets()
+    map_id = _resolve_seasonal(map_id, available)
     if map_id in _MAP_CACHE:
         return _MAP_CACHE[map_id]
 
-    available = maps_module.list_map_sets()
     if map_id not in available:
+        if not available:
+            raise RuntimeError("no map sets installed")
         map_id = next(iter(available))
         if map_id in _MAP_CACHE:
             return _MAP_CACHE[map_id]
@@ -178,6 +210,46 @@ def _apply_clouds(base: Image.Image, cloud_layer: Image.Image, center_lon: float
     return Image.alpha_composite(base, cloud_layer).convert("RGB")
 
 
+def _format_quake_label(q: dict, mode: str) -> str:
+    """Build the text to draw next to a quake marker, based on the user's
+    label preference. Handles missing fields gracefully - USGS quakes
+    always have a magnitude but `place` and `time_ms` can be absent on
+    synthetic data or older cache formats."""
+    if mode == "none" or not mode:
+        return ""
+    mag = q.get("mag")
+    place = (q.get("place") or "").strip()
+    # USGS place is like "12 km NW of Anza, CA". Drop the leading
+    # distance so the label reads as a place name.
+    if " of " in place:
+        place = place.split(" of ", 1)[1]
+    time_ms = q.get("time_ms")
+    time_str = ""
+    if time_ms:
+        try:
+            from datetime import datetime, timezone
+            dt = datetime.fromtimestamp(int(time_ms) / 1000.0, tz=timezone.utc)
+            # Compact "DD Mon HH:MM UTC" - fits next to a small marker.
+            time_str = dt.strftime("%d %b %H:%M UTC")
+        except (ValueError, OSError):
+            time_str = ""
+    mag_str = f"M{mag:.1f}" if mag is not None else ""
+
+    if mode == "magnitude":
+        return mag_str
+    if mode == "place":
+        return place or mag_str
+    if mode == "time":
+        return time_str or mag_str
+    if mode == "mag_place":
+        parts = [p for p in (mag_str, place) if p]
+        return "  ".join(parts)
+    if mode == "mag_time":
+        parts = [p for p in (mag_str, time_str) if p]
+        return "  ".join(parts)
+    return mag_str
+
+
 def _draw_hazards(img: Image.Image, center_lon: float,
                   earthquakes: list | None, hurricanes: list | None,
                   style: dict | None = None) -> Image.Image:
@@ -207,11 +279,42 @@ def _draw_hazards(img: Image.Image, center_lon: float,
     eq_shape = st.get("eq_shape", "circle")
     eq_color_mode = st.get("eq_color_mode", "magnitude")
     eq_custom = _hex_rgba(st.get("eq_color", "#FF3B30"), 190)
-    eq_show_mag = bool(st.get("eq_show_magnitude", False))
+    # Old boolean magnitude-only flag stays honoured for backwards
+    # compatibility, but the new "eq_label" string is preferred and can
+    # be "none" / "magnitude" / "place" / "time" / "mag_place" /
+    # "mag_time". Falls back to the old flag if a fresh key isn't set.
+    eq_label_mode = st.get("eq_label", None)
+    if eq_label_mode is None:
+        eq_label_mode = "magnitude" if st.get("eq_show_magnitude", False) else "none"
     eq_mag_color = _hex_rgba(st.get("eq_mag_color", "#FFFFFF"), 255)
     eq_mag_size = float(st.get("eq_mag_text_size", 1.0))
 
-    for q in reversed(earthquakes or []):
+    # ---- Optional spatial clustering ----
+    # When lots of quakes happen close together (aftershock sequences,
+    # Ring of Fire clusters), their markers stack up and the map turns
+    # into a blob. When enabled, we bucket quakes into a grid of cells
+    # ~cluster_degrees wide and keep only the biggest one per cell.
+    eq_cluster = bool(st.get("eq_cluster", True))
+    cluster_deg = max(0.5, float(st.get("eq_cluster_degrees", 4.0)))
+    eqs_source = list(earthquakes or [])
+    if eq_cluster and len(eqs_source) > 1:
+        keep_by_cell: dict[tuple[int, int], dict] = {}
+        for q in eqs_source:
+            try:
+                lat = float(q["lat"])
+                lon = float(q["lon"])
+                mag = float(q.get("mag", 0.0))
+            except (KeyError, TypeError, ValueError):
+                continue
+            cell = (int(lat // cluster_deg), int(lon // cluster_deg))
+            existing = keep_by_cell.get(cell)
+            if existing is None or mag > existing.get("mag", 0.0):
+                keep_by_cell[cell] = q
+        # Sort strongest last so it draws on top.
+        eqs_source = sorted(keep_by_cell.values(),
+                            key=lambda q: q.get("mag", 0.0))
+
+    for q in eqs_source:
         try:
             mag = q.get("mag", 0.0)
             x, y = _lonlat_to_xy(q["lon"], q["lat"], w, h, center_lon)
@@ -221,9 +324,10 @@ def _draw_hazards(img: Image.Image, center_lon: float,
             color = eq_custom if eq_color_mode == "custom" else _quake_color(mag)
             _draw_marker(draw, eq_shape, x, y, r, color,
                          outline=(20, 20, 20, 200))
-            if eq_show_mag:
+            label_text = _format_quake_label(q, eq_label_mode)
+            if label_text:
                 _draw_hazard_label(
-                    draw, f"{mag:.1f}", x + r + max(2, r // 3), y - r,
+                    draw, label_text, x + r + max(2, r // 3), y - r,
                     fill=eq_mag_color,
                     size=max(10, int((w / 150) * eq_mag_size)))
         except Exception:
@@ -258,9 +362,15 @@ DEFAULT_HAZARD_STYLE = {
     "eq_color_mode": "magnitude", # magnitude (ramp) | custom
     "eq_color": "#FF3B30",        # used when eq_color_mode == custom
     "eq_size": 1.0,               # marker size multiplier
-    "eq_show_magnitude": False,   # print the magnitude number by each quake
+    "eq_show_magnitude": False,   # legacy - superseded by eq_label
+    "eq_label": "none",           # none | magnitude | place | time |
+                                  # mag_place | mag_time
     "eq_mag_color": "#FFFFFF",
     "eq_mag_text_size": 1.0,
+    # Cluster overlapping quakes so aftershock sequences don't turn the
+    # map into a red blob. Keeps the largest quake in each ~4°x4° cell.
+    "eq_cluster": True,
+    "eq_cluster_degrees": 4.0,
     # Hurricanes
     "hur_shape": "spiral",        # spiral | ring | dot
     "hur_color_mode": "category", # category (ramp) | custom

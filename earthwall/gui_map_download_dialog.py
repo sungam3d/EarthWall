@@ -128,9 +128,15 @@ class MapDownloadDialog(QDialog):
         sel_row = QHBoxLayout()
         all_btn = QPushButton("Select all available")
         all_btn.clicked.connect(lambda: self._set_all(True))
+        seasonal_btn = QPushButton("Select all 12 Blue Marble months (for Seasonal mode)")
+        seasonal_btn.setToolTip(
+            "Ticks every available Blue Marble monthly composite so you "
+            "can enable the Seasonal (automatic) map on the Maps tab.")
+        seasonal_btn.clicked.connect(self._select_all_bmng)
         none_btn = QPushButton("Select none")
         none_btn.clicked.connect(lambda: self._set_all(False))
         sel_row.addWidget(all_btn)
+        sel_row.addWidget(seasonal_btn)
         sel_row.addWidget(none_btn)
         sel_row.addStretch()
         layout.addLayout(sel_row)
@@ -158,6 +164,13 @@ class MapDownloadDialog(QDialog):
         for ck in self._checks.values():
             if ck.isEnabled():
                 ck.setChecked(state)
+
+    def _select_all_bmng(self) -> None:
+        """Tick every available Blue Marble monthly composite. Handy
+        for the Seasonal (automatic) map mode which needs all 12."""
+        for item_id, ck in self._checks.items():
+            if ck.isEnabled() and item_id.startswith("bmng_"):
+                ck.setChecked(True)
 
     def _selected_items(self) -> list[dict]:
         return [self._items_by_id[i] for i, ck in self._checks.items()

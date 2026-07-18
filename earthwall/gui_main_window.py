@@ -259,6 +259,27 @@ class MainWindow(QMainWindow):
         self.profile_delete_btn.clicked.connect(self._delete_active_profile)
         prof_row.addWidget(self.profile_delete_btn)
         profiles_layout.addLayout(prof_row)
+
+        # Import / export a profile to a file - separate from the whole-
+        # settings backup on the Backup group below. Handy for sharing a
+        # profile between machines or with someone else, without touching
+        # your other saved profiles.
+        prof_io_row = QHBoxLayout()
+        prof_io_row.addWidget(QLabel("Profile file:"))
+        self.profile_import_btn = QPushButton("Import from file…")
+        self.profile_import_btn.setToolTip(
+            "Load a previously-exported profile JSON as a new profile.")
+        self.profile_import_btn.clicked.connect(self._import_profile_from_file)
+        prof_io_row.addWidget(self.profile_import_btn)
+        self.profile_export_btn = QPushButton("Export to file…")
+        self.profile_export_btn.setToolTip(
+            "Save the currently-selected profile as a JSON file you can "
+            "share, back up, or copy to another machine.")
+        self.profile_export_btn.clicked.connect(self._export_profile_to_file)
+        prof_io_row.addWidget(self.profile_export_btn)
+        prof_io_row.addStretch()
+        profiles_layout.addLayout(prof_io_row)
+
         layout.addWidget(profiles_box)
 
         form = QFormLayout()
@@ -481,17 +502,25 @@ class MainWindow(QMainWindow):
         eq_style_row.addStretch()
         hazards_layout.addLayout(eq_style_row)
 
-        # Magnitude number label + its styling
+        # Label content + styling. Superseded the plain "show magnitude"
+        # checkbox with a combo that also offers "place" and "time".
         eq_mag_row = QHBoxLayout()
-        self.eq_show_mag_check = QCheckBox("Show magnitude number")
-        self.eq_show_mag_check.toggled.connect(self._on_hazard_style_changed)
-        eq_mag_row.addWidget(self.eq_show_mag_check)
-        eq_mag_row.addWidget(QLabel("Text colour:"))
+        eq_mag_row.addWidget(QLabel("Text next to marker:"))
+        self.eq_label_combo = QComboBox()
+        self.eq_label_combo.addItem("None", "none")
+        self.eq_label_combo.addItem("Magnitude", "magnitude")
+        self.eq_label_combo.addItem("Place", "place")
+        self.eq_label_combo.addItem("Time (UTC)", "time")
+        self.eq_label_combo.addItem("Magnitude + place", "mag_place")
+        self.eq_label_combo.addItem("Magnitude + time", "mag_time")
+        self.eq_label_combo.currentIndexChanged.connect(self._on_hazard_style_changed)
+        eq_mag_row.addWidget(self.eq_label_combo)
+        eq_mag_row.addWidget(QLabel("Colour:"))
         self.eq_mag_color_btn = QPushButton()
         self.eq_mag_color_btn.setFixedWidth(44)
         self.eq_mag_color_btn.clicked.connect(lambda: self._pick_hazard_color("eq_mag_color"))
         eq_mag_row.addWidget(self.eq_mag_color_btn)
-        eq_mag_row.addWidget(QLabel("Text size:"))
+        eq_mag_row.addWidget(QLabel("Size:"))
         self.eq_mag_size_spin = QDoubleSpinBox()
         self.eq_mag_size_spin.setRange(0.5, 4.0)
         self.eq_mag_size_spin.setSingleStep(0.1)
@@ -500,6 +529,32 @@ class MainWindow(QMainWindow):
         eq_mag_row.addWidget(self.eq_mag_size_spin)
         eq_mag_row.addStretch()
         hazards_layout.addLayout(eq_mag_row)
+
+        # Cluster nearby quakes: aftershock sequences and Ring-of-Fire
+        # clusters make the map unreadable otherwise. When enabled, only
+        # the largest quake in each spatial cell is drawn.
+        eq_cluster_row = QHBoxLayout()
+        self.eq_cluster_check = QCheckBox(
+            "Group overlapping quakes (show largest per region)")
+        self.eq_cluster_check.setToolTip(
+            "When many quakes happen in the same area (aftershock sequences, "
+            "the Ring of Fire), their markers stack and clutter the map. "
+            "This keeps only the biggest one per grid cell.")
+        self.eq_cluster_check.toggled.connect(self._on_hazard_style_changed)
+        eq_cluster_row.addWidget(self.eq_cluster_check)
+        eq_cluster_row.addWidget(QLabel("Cell size:"))
+        self.eq_cluster_deg_spin = QDoubleSpinBox()
+        self.eq_cluster_deg_spin.setRange(0.5, 20.0)
+        self.eq_cluster_deg_spin.setSingleStep(0.5)
+        self.eq_cluster_deg_spin.setValue(4.0)
+        self.eq_cluster_deg_spin.setSuffix("°")
+        self.eq_cluster_deg_spin.setToolTip(
+            "Width of the grid cells used for clustering (in degrees "
+            "lat/lon). Bigger cells = more aggressive grouping.")
+        self.eq_cluster_deg_spin.valueChanged.connect(self._on_hazard_style_changed)
+        eq_cluster_row.addWidget(self.eq_cluster_deg_spin)
+        eq_cluster_row.addStretch()
+        hazards_layout.addLayout(eq_cluster_row)
 
         # Hurricanes
         self.hurricanes_check = QCheckBox(
@@ -1339,8 +1394,13 @@ class MainWindow(QMainWindow):
         st["eq_shape"] = self.eq_shape_combo.currentData() or "circle"
         st["eq_color_mode"] = self.eq_color_combo.currentData() or "magnitude"
         st["eq_size"] = float(self.eq_size_spin.value())
-        st["eq_show_magnitude"] = self.eq_show_mag_check.isChecked()
+        st["eq_label"] = self.eq_label_combo.currentData() or "none"
+        # Also update the legacy boolean so a downgrade to an older
+        # version keeps roughly the same behaviour.
+        st["eq_show_magnitude"] = st["eq_label"] != "none"
         st["eq_mag_text_size"] = float(self.eq_mag_size_spin.value())
+        st["eq_cluster"] = self.eq_cluster_check.isChecked()
+        st["eq_cluster_degrees"] = float(self.eq_cluster_deg_spin.value())
         st["hur_shape"] = self.hur_shape_combo.currentData() or "spiral"
         st["hur_color_mode"] = self.hur_color_combo.currentData() or "category"
         st["hur_size"] = float(self.hur_size_spin.value())
@@ -1386,22 +1446,31 @@ class MainWindow(QMainWindow):
                     combo.setCurrentIndex(i); return
 
         for wdt in (self.eq_shape_combo, self.eq_color_combo, self.eq_size_spin,
-                    self.eq_show_mag_check, self.eq_mag_size_spin,
+                    self.eq_label_combo, self.eq_mag_size_spin,
+                    self.eq_cluster_check, self.eq_cluster_deg_spin,
                     self.hur_shape_combo, self.hur_color_combo, self.hur_size_spin,
                     self.hur_show_name_check, self.hur_show_track_check):
             wdt.blockSignals(True)
         _set_combo(self.eq_shape_combo, st.get("eq_shape", "circle"))
         _set_combo(self.eq_color_combo, st.get("eq_color_mode", "magnitude"))
         self.eq_size_spin.setValue(float(st.get("eq_size", 1.0)))
-        self.eq_show_mag_check.setChecked(bool(st.get("eq_show_magnitude", False)))
+        # eq_label is the current setting; fall back to reading the old
+        # boolean so existing configs from earlier versions upgrade cleanly.
+        eq_label = st.get("eq_label")
+        if eq_label is None:
+            eq_label = "magnitude" if st.get("eq_show_magnitude", False) else "none"
+        _set_combo(self.eq_label_combo, eq_label)
         self.eq_mag_size_spin.setValue(float(st.get("eq_mag_text_size", 1.0)))
+        self.eq_cluster_check.setChecked(bool(st.get("eq_cluster", True)))
+        self.eq_cluster_deg_spin.setValue(float(st.get("eq_cluster_degrees", 4.0)))
         _set_combo(self.hur_shape_combo, st.get("hur_shape", "spiral"))
         _set_combo(self.hur_color_combo, st.get("hur_color_mode", "category"))
         self.hur_size_spin.setValue(float(st.get("hur_size", 1.0)))
         self.hur_show_name_check.setChecked(bool(st.get("hur_show_name", True)))
         self.hur_show_track_check.setChecked(bool(st.get("hur_show_track", True)))
         for wdt in (self.eq_shape_combo, self.eq_color_combo, self.eq_size_spin,
-                    self.eq_show_mag_check, self.eq_mag_size_spin,
+                    self.eq_label_combo, self.eq_mag_size_spin,
+                    self.eq_cluster_check, self.eq_cluster_deg_spin,
                     self.hur_shape_combo, self.hur_color_combo, self.hur_size_spin,
                     self.hur_show_name_check, self.hur_show_track_check):
             wdt.blockSignals(False)
@@ -1758,11 +1827,34 @@ class MainWindow(QMainWindow):
 
     # ----------------------------------------------------------------- maps
     def _refresh_map_list(self) -> None:
+        # `from earthwall import render` gives the FUNCTION (re-exported
+        # via __init__.py), not the submodule - so we grab the submodule
+        # from sys.modules instead to get at SEASONAL_AUTO_ID.
+        import sys
+        render_module = sys.modules["earthwall.render"]
         self.map_list.blockSignals(True)
         self.map_list.clear()
         maps = maps_module.list_map_sets()
         selected_row = 0
-        for i, (map_id, info) in enumerate(maps.items()):
+        # "Seasonal (automatic)" always appears at the top of the list -
+        # picks whichever Blue Marble month matches the current calendar
+        # month at render time. Shows a hint about which months are
+        # still missing if the user hasn't downloaded all 12 yet.
+        bmng_installed = sum(
+            1 for k in maps if k.startswith("bmng_"))
+        if bmng_installed >= 12:
+            seasonal_label = "Seasonal (matches current month, all 12 installed)"
+        else:
+            seasonal_label = (
+                f"Seasonal (matches current month — {bmng_installed}/12 installed, "
+                "download rest to fill the year)")
+        seasonal_item = QListWidgetItem(seasonal_label)
+        seasonal_item.setData(Qt.UserRole, render_module.SEASONAL_AUTO_ID)
+        self.map_list.addItem(seasonal_item)
+        if self.settings.get("map_set") == render_module.SEASONAL_AUTO_ID:
+            selected_row = 0
+
+        for i, (map_id, info) in enumerate(maps.items(), start=1):
             label = info["name"] + ("" if info["builtin"] else "  (custom)")
             item = QListWidgetItem(label)
             item.setData(Qt.UserRole, map_id)
@@ -1966,6 +2058,7 @@ class MainWindow(QMainWindow):
         self.profile_rename_btn.setEnabled(has_profile)
         self.profile_delete_btn.setEnabled(has_profile)
         self.profile_save_btn.setEnabled(has_profile)
+        self.profile_export_btn.setEnabled(has_profile)
 
     def _on_profile_selected(self, _idx: int) -> None:
         """User picked a profile from the dropdown. Loading a profile
@@ -2151,6 +2244,105 @@ class MainWindow(QMainWindow):
         settings_module.save_settings(self.settings)
         self._refresh_profile_combo()
         self.status_label.setText(f"Deleted profile {name!r}.")
+
+    def _export_profile_to_file(self) -> None:
+        """Save the currently-selected profile as a JSON file the user
+        picks. Uses the same bundle format as the settings-wide export,
+        so an exported profile file is interchangeable with a settings
+        backup and can be imported through either UI path."""
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        from . import profiles as profiles_module
+        name = self.settings.get("active_profile") or ""
+        if not name:
+            QMessageBox.information(
+                self, "No profile selected",
+                "Pick a saved profile from the dropdown first, then Export.")
+            return
+        try:
+            # Read the profile from disk (not our in-memory state - the
+            # user might have unsaved changes they don't want exported).
+            settings, cities = profiles_module.load_profile(name)
+        except (FileNotFoundError, ValueError, OSError) as e:
+            QMessageBox.critical(
+                self, "Export failed",
+                f"Couldn't read profile {name!r}:\n{e}")
+            return
+        default_name = f"earthwall-profile-{name.replace(' ', '_')}.json"
+        path, _ = QFileDialog.getSaveFileName(
+            self, f"Export profile {name!r}",
+            str(Path.home() / default_name),
+            "JSON files (*.json);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            bundle = settings_module.export_bundle(settings, cities)
+            with open(path, "w") as f:
+                json.dump(bundle, f, indent=2)
+            self.status_label.setText(
+                f"Exported profile {name!r} to {Path(path).name}.")
+        except OSError as e:
+            QMessageBox.critical(
+                self, "Export failed",
+                f"Could not write {path}:\n{e}")
+
+    def _import_profile_from_file(self) -> None:
+        """Load a JSON bundle from a file the user picks and save it as
+        a new profile. Prompts for a name (defaults to the file stem);
+        offers to overwrite if a profile of that name exists."""
+        from PySide6.QtWidgets import QFileDialog, QInputDialog, QMessageBox
+        from . import profiles as profiles_module
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import profile",
+            str(Path.home()),
+            "JSON files (*.json);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            with open(path) as f:
+                bundle = json.load(f)
+            new_settings, new_cities = settings_module.import_bundle(bundle)
+        except (OSError, json.JSONDecodeError, ValueError) as e:
+            QMessageBox.critical(
+                self, "Import failed",
+                f"Couldn't read that file as an EarthWall bundle:\n{e}")
+            return
+        # Default profile name = file stem, stripped of the common prefix
+        # we use when exporting.
+        default = Path(path).stem
+        if default.startswith("earthwall-profile-"):
+            default = default[len("earthwall-profile-"):]
+        default = default.replace("_", " ").strip() or "Imported profile"
+        name, ok = QInputDialog.getText(
+            self, "Name the imported profile",
+            "Save as profile name:", text=default)
+        if not ok:
+            return
+        name = name.strip()
+        if not profiles_module.is_valid_name(name):
+            QMessageBox.warning(
+                self, "Invalid name",
+                "Profile names must be 1-64 characters and can contain "
+                "letters, numbers, spaces, dots, dashes, and underscores.")
+            return
+        if name in profiles_module.list_profiles():
+            reply = QMessageBox.question(
+                self, "Overwrite profile?",
+                f"A profile named {name!r} already exists. Overwrite it?",
+                QMessageBox.Yes | QMessageBox.No)
+            if reply != QMessageBox.Yes:
+                return
+        try:
+            profiles_module.save_profile(name, new_settings, new_cities)
+        except (OSError, ValueError) as e:
+            QMessageBox.critical(
+                self, "Import failed",
+                f"Couldn't save the imported profile:\n{e}")
+            return
+        self._refresh_profile_combo()
+        self.status_label.setText(
+            f"Imported profile as {name!r}. Select it from the dropdown to load it.")
 
     def _export_settings(self) -> None:
         """Save all current settings + cities to a JSON file the user
