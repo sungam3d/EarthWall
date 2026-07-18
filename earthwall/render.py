@@ -89,6 +89,69 @@ def invalidate_map_cache(map_id: str | None = None) -> None:
         _MAP_CACHE.pop(map_id, None)
 
 
+def _heal_antimeridian_seam(img: Image.Image, blend_px: int = 48) -> Image.Image:
+    """Smooth the antimeridian seam of an equirectangular map so it's
+    invisible after the map is rolled or tiled.
+
+    NASA's Blue Marble day JPEGs aren't perfectly seamless at ±180°: the
+    leftmost column (-180°) and rightmost column (+180°) are the same
+    meridian but their pixel values don't match (JPEG compression plus the
+    difficulty of matching imagery at the poles). Left as-is, that seam
+    shows up as a hard vertical line / dark wedge - most visible near the
+    poles (top of the image) - wherever the roll places the ±180° join.
+
+    The seam sits *between* the last column and the first column (they're
+    adjacent once the map wraps). To hide it we make the two sides meet:
+    across a `blend_px` zone straddling the wrap, we cross-fade the left
+    edge and right edge so that at the seam itself both sides equal the
+    average of the two. Concretely, for a pixel `d` columns to the RIGHT
+    of the seam (i.e. near the left edge, columns 0..blend_px):
+
+        weight w = 0.5 * (1 - d/blend_px)        # 0.5 at seam → 0 at edge
+        new = original*(1-w) + opposite_edge*w
+
+    and symmetrically for pixels to the LEFT of the seam (near the right
+    edge). At the seam (d=0) both sides get 0.5/0.5, so they're identical
+    and the discontinuity vanishes; blend_px columns away the pixels are
+    untouched. Everything outside the two blend strips is unchanged."""
+    arr = np.asarray(img).astype(np.float32)
+    h, w = arr.shape[:2]
+    blend_px = max(1, min(blend_px, w // 16))
+
+    # Column just left of the seam (right edge) and just right (left edge).
+    left_edge_col  = arr[:, 0, :].copy()      # +... actually -180 side
+    right_edge_col = arr[:, -1, :].copy()     # +180 side
+    seam_avg = (left_edge_col + right_edge_col) * 0.5
+
+    # Distances from the seam: for left strip, column index d = 0..blend_px-1
+    # is d+? pixels from the seam. Column 0 is adjacent to the seam (right
+    # edge is on the other side), so its distance is ~1; treat col i as
+    # distance (i + 0.5).
+    idx = np.arange(blend_px, dtype=np.float32)
+    # Weight toward the seam average. At the column immediately beside the
+    # seam the weight is 1.0 (pixel becomes exactly the average, so both
+    # sides of the seam match), fading linearly to 0.0 blend_px columns in.
+    # A subtle smootherstep on the ramp avoids a visible "edge" where the
+    # blend zone ends.
+    t = 1.0 - idx / blend_px            # 1 at seam edge → 0 inward
+    t = t * t * (3.0 - 2.0 * t)         # smoothstep
+    w_left = t                          # columns 0..blend_px-1
+    w_right = t[::-1]                    # columns -blend_px..-1
+
+    # Blend left strip toward the seam average.
+    arr[:, :blend_px, :] = (
+        arr[:, :blend_px, :] * (1.0 - w_left[None, :, None])
+        + seam_avg[:, None, :] * w_left[None, :, None]
+    )
+    # Blend right strip toward the seam average.
+    arr[:, -blend_px:, :] = (
+        arr[:, -blend_px:, :] * (1.0 - w_right[None, :, None])
+        + seam_avg[:, None, :] * w_right[None, :, None]
+    )
+
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+
+
 def _roll_longitude(img: Image.Image, center_lon: float) -> Image.Image:
     """Shift an equirectangular image horizontally so `center_lon` sits in
     the middle of the frame, wrapping around the edges. center_lon=0 is a
@@ -993,6 +1056,15 @@ def _render_map_image(width: int, height: int, cities: list[dict],
                                           twilight_width_deg, night_darkness)
     else:
         composite = day_img.convert("RGB")
+    # Heal the antimeridian seam BEFORE rolling. In the un-rolled map the
+    # seam is the join between the left edge (-180°) and right edge (+180°),
+    # which sits at the image's left/right borders - exactly where
+    # _heal_antimeridian_seam operates. Rolling afterwards carries those
+    # blended pixels to wherever the centre longitude puts them, so the
+    # seam stays smooth no matter how the map is re-centred. (Healing
+    # after rolling would miss it: np.roll moves the seam into the image
+    # interior, away from the edges the healer touches.)
+    composite = _heal_antimeridian_seam(composite)
     composite = _roll_longitude(composite, center_lon)
     if not low_usage:
         composite = composite.filter(ImageFilter.UnsharpMask(radius=1.5, percent=60, threshold=2))
