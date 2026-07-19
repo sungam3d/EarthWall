@@ -352,23 +352,11 @@ class MainWindow(QMainWindow):
         perf_layout.addWidget(self.pause_on_fullscreen_check)
         layout.addWidget(perf_box)
 
-        # ---- Import / Export -------------------------------------------
-        # Save/load ALL settings + cities as a single JSON bundle. Handy
-        # for moving a hand-tuned setup between machines or backing up
-        # before experimenting.
-        io_box = QGroupBox("Settings backup")
-        io_layout = QHBoxLayout(io_box)
-        io_layout.addWidget(QLabel(
-            "Save or load your complete configuration (settings + cities)"
-            " as a single JSON file:"))
-        io_layout.addStretch()
-        self.export_btn = QPushButton("Export…")
-        self.export_btn.clicked.connect(self._export_settings)
-        io_layout.addWidget(self.export_btn)
-        self.import_btn = QPushButton("Import…")
-        self.import_btn.clicked.connect(self._import_settings)
-        io_layout.addWidget(self.import_btn)
-        layout.addWidget(io_box)
+        # (Whole-settings backup was previously here as an "Export…" /
+        # "Import…" pair. That's been retired in favour of per-profile
+        # import / export up in the Profile group above - the two
+        # workflows overlapped confusingly and the profile route is
+        # what people actually reach for.)
 
         layout.addStretch()
         return w
@@ -1551,6 +1539,24 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------ settings <-> UI
     def _load_settings_into_ui(self) -> None:
+        # Guard the whole load with _initializing so any widget change
+        # that fires during setValue()/setChecked() calls below doesn't
+        # bounce back into _on_settings_changed and clobber the freshly
+        # loaded settings with the current (still-old) widget state.
+        # Without this guard, setting one widget causes _on_settings_changed
+        # to fire, which reads the OTHER (not yet updated) widgets' values
+        # and writes them back into self.settings["monitor_configs"] -
+        # overwriting the profile's zoom / tile_map / position with the
+        # stale in-widget values. Zoom and tile_map hit this hardest
+        # because they share a config write path.
+        was_initializing = getattr(self, "_initializing", False)
+        self._initializing = True
+        try:
+            self._load_settings_into_ui_body()
+        finally:
+            self._initializing = was_initializing
+
+    def _load_settings_into_ui_body(self) -> None:
         s = self.settings
         # Populate the profile dropdown from disk and select the
         # currently-active one, if any.
@@ -2344,86 +2350,6 @@ class MainWindow(QMainWindow):
         self.status_label.setText(
             f"Imported profile as {name!r}. Select it from the dropdown to load it.")
 
-    def _export_settings(self) -> None:
-        """Save all current settings + cities to a JSON file the user
-        picks. Handy for backing up before experimenting, or for moving a
-        finished setup between machines."""
-        from PySide6.QtWidgets import QFileDialog
-        default_name = f"earthwall-settings-{datetime.now().strftime('%Y%m%d')}.json"
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Export EarthWall settings",
-            str(Path.home() / default_name),
-            "JSON files (*.json);;All files (*)",
-        )
-        if not path:
-            return
-        try:
-            bundle = settings_module.export_bundle(self.settings, self.cities)
-            with open(path, "w") as f:
-                json.dump(bundle, f, indent=2)
-            self.status_label.setText(f"Settings exported to {Path(path).name}")
-        except OSError as e:
-            from PySide6.QtWidgets import QMessageBox
-            QMessageBox.critical(
-                self, "Export failed",
-                f"Could not write {path}:\n{e}")
-
-    def _import_settings(self) -> None:
-        """Replace current settings + cities with those from a JSON file
-        the user picks. Asks for confirmation first - this discards their
-        current setup - and offers to back up the existing config to
-        <path>.bak before overwriting, in case the import turns out
-        wrong."""
-        from PySide6.QtWidgets import QFileDialog, QMessageBox
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Import EarthWall settings",
-            str(Path.home()),
-            "JSON files (*.json);;All files (*)",
-        )
-        if not path:
-            return
-        try:
-            with open(path) as f:
-                bundle = json.load(f)
-            new_settings, new_cities = settings_module.import_bundle(bundle)
-        except (OSError, json.JSONDecodeError, ValueError) as e:
-            QMessageBox.critical(
-                self, "Import failed",
-                f"Couldn't read that file as an EarthWall bundle:\n{e}")
-            return
-        # Confirmation - imports are destructive.
-        n_cities = len(new_cities)
-        reply = QMessageBox.question(
-            self, "Import settings?",
-            f"Replace your current settings and {len(self.cities)} cities with "
-            f"the {n_cities} cities and settings from this file?\n\n"
-            "Your existing configuration will be backed up automatically.",
-            QMessageBox.Yes | QMessageBox.No,
-        )
-        if reply != QMessageBox.Yes:
-            return
-        # Backup current config before overwriting.
-        try:
-            backup = settings_module.export_bundle(self.settings, self.cities)
-            backup_path = (settings_module.CONFIG_DIR
-                           / f"settings-backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json")
-            settings_module.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-            with open(backup_path, "w") as f:
-                json.dump(backup, f, indent=2)
-        except OSError:
-            backup_path = None  # non-fatal
-        # Apply.
-        self.settings = new_settings
-        self.cities = new_cities
-        settings_module.save_settings(self.settings)
-        settings_module.save_cities(self.cities)
-        self._load_settings_into_ui()
-        self._refresh_city_table()
-        self._schedule_preview_update()
-        msg = f"Imported {n_cities} cities and updated settings."
-        if backup_path is not None:
-            msg += f" Previous config backed up to {backup_path.name}."
-        self.status_label.setText(msg)
 
     def _trigger_manual_update(self, *_qt_args) -> None:
         """Wrap trigger_update with a "user hit the button" flag so the
