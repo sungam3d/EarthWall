@@ -230,10 +230,6 @@ class MainWindow(QMainWindow):
         # everything below.
         profiles_box = QGroupBox("Profile")
         profiles_layout = QVBoxLayout(profiles_box)
-        profiles_layout.addWidget(QLabel(
-            "Save your current setup as a named profile you can switch "
-            "back to later. Selecting a profile loads its settings and "
-            "cities; hitting Save writes your current state to it."))
         prof_row = QHBoxLayout()
         prof_row.addWidget(QLabel("Active profile:"))
         self.profile_combo = QComboBox()
